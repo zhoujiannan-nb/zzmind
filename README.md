@@ -27,7 +27,8 @@
 
 ## 🎯 我们要训的模型（0.5B）
 
-沿用 minimind 的 Qwen3 风格架构（RoPE + GQA + QK-Norm + SwiGLU + RMSNorm），把尺寸放大到 0.5B：
+沿用 minimind 的 Qwen3 风格架构（RoPE + GQA + QK-Norm + SwiGLU + RMSNorm），把尺寸放大到 0.5B。
+下表是**设计工作坊的默认值（均衡方案 B）**，最终规格以 `02_architecture/design/DESIGN.md` 的拍板结果为准：
 
 | 超参数 | 值 | 备注 |
 |---|---|---|
