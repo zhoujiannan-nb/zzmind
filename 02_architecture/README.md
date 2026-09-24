@@ -99,6 +99,12 @@ temperature 缩放 → top_k 截断（只留前 50 个）→ top_p 截断（累�
 - Embedding：6400 × 1280 = 8.2M（lm_head 共享，不重复计）
 - **总计 ≈ 498M ✓ 0.5B**
 
+## 可视化（先读这个）
+- **`architecture_viz.html`**：单文件页面（图内嵌，浏览器直接打开），四张图 + 讲解：
+  ① 模型 = 8 种 Linear 层 + 4 个"三明治" ② 前向传播张量形状走查
+  ③ 参数审计 ④ 为什么是这个形状（2017→2026 演化）
+- **`figures/`**：四张图的 PNG 版（fig1~fig4），需要插图时用
+
 ## 代码地图（minimind/model/model_minimind.py）
 - L10-46  `MiniMindConfig`：所有超参数 + YaRN 配置
 - L50-60  `RMSNorm`：归一化
@@ -122,13 +128,15 @@ temperature 缩放 → top_k 截断（只留前 50 个）→ top_p 截断（累�
 - [ ] 手算 0.5B 总参数量，与 E2 输出对比（误差 < 5%）
 - [ ] 采样管线各步骤顺序与各自作用
 
-## 实验任务（node05 执行，脚本在 experiments/）
-- **E1 前向走查**：随机初始化 0.5B，喂一句话，打印每一层输出形状、
+## 实验任务（脚本在 `experiments/`，node05 或本机 CPU 都能跑）
+- **E1 前向走查**（`experiments/E1_forward_walk.py`）：随机初始化 0.5B，喂一句话，打印每一层输出形状、
   logits 范围、初始 loss（应 ≈ ln(6400) ≈ 8.76）。验证你对形状流的理解。
-- **E2 参数审计**：统计每个模块参数量，打印占比，对比手算值。
-- **E3 手写迷你 GPT**：不看 model_minimind.py，用 ~60 行 PyTorch 写一个
-  2 层、64 维、小词表的 GPT，在 CPU 上训练"固定模式"（如 a→b→a→b），
-  loss 降下来并能正确预测下一个 token 即算通过。
+  2026-09-25 已在 node05 跑通（GPU 被 SGLang 占用时走 CPU 也行）。
+- **E2 参数审计**（`experiments/E2_param_audit.py`）：统计每个模块参数量，打印占比，对比手算值。
+  2026-09-25 已跑通：实测 497.812M，与手算偏差 0.01%。
+- **E3 手写迷你 GPT**（`experiments/E3_mini_gpt.py`，自包含只要 torch）：不看 model_minimind.py，用 ~60 行 PyTorch 写一个
+  2 层、64 维、小词表的 GPT，在 CPU 上训练"固定模式"（a→b→a→b），
+  loss 降下来并能正确预测下一个 token 即算通过。2026-09-25 已跑通（~30 秒）。
 - **E4 注意力可视化（选做）**：取 E1 的模型，画某一层对某句话的
   注意力矩阵热力图，观察 causal 下三角结构。
 
