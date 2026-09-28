@@ -24,6 +24,7 @@ POOL   = os.path.join(HERE, "model_pool.json")
 API_PORT = 7799
 WORKERS, BATCH, TOTAL = 8, 1000, 680000
 MIN_WORKERS, MAX_WORKERS = 2, 12   # 看板"并发+2"热切换：8 ↔ 10，上限 12
+LIMIT_WORKERS = 4                  # 限流开关：白天留算力给别的任务，开启时并发钳到 4（kv "limit"，非破坏性，关闭即恢复）
 THINK_RATIO = 0.20
 # 思考档位：SGLang 官方参数 reasoning_effort（顶层字段）。
 # 服务器实测支持 none/low/medium/xhigh；high/minimal/max → 400。
@@ -256,7 +257,10 @@ def next_batch(conn, limit_done):
 def cur_workers(conn):
     try: w = int(kv_get(conn, "workers", str(WORKERS)))
     except (ValueError, TypeError): w = WORKERS
-    return max(MIN_WORKERS, min(MAX_WORKERS, w))
+    w = max(MIN_WORKERS, min(MAX_WORKERS, w))
+    if kv_get(conn, "limit", "0") == "1":  # 限流开关：钳到 4，不动 kv workers（关掉立即恢复）
+        w = min(w, LIMIT_WORKERS)
+    return w
 
 def run(limit=None, smoke=False):
     init_db()
@@ -405,6 +409,7 @@ def make_handler():
                 self._send({"running": kv_get(conn,"running","1")=="1",
                             "fallback": kv_get(conn,"fallback","1")=="1",
                             "think": kv_get(conn,"think","1")=="1",
+                            "limit": kv_get(conn,"limit","0")=="1",
                             "workers": cur_workers(conn), "base_workers": WORKERS, "max_workers": MAX_WORKERS,
                             "generated": made, "target": tt["t"],
                             "throughput_tps": round(_tok["rate"],1),

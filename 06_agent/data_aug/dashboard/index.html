@@ -136,6 +136,7 @@
   <label class="sw"><input type="checkbox" id="swRun" checked><span class="tr"></span>生成运行</label>
   <label class="sw"><input type="checkbox" id="swFallback" checked><span class="tr"></span>兜底类（判断不了→不硬选）</label>
   <label class="sw"><input type="checkbox" id="swThink" checked><span class="tr"></span>真实思考 20%</label>
+  <label class="sw"><input type="checkbox" id="swLimit"><span class="tr"></span>限流（白天留算力，并发→4）</label>
   <button id="btnBoost" style="margin-left:10px;padding:6px 14px;border-radius:8px;border:1px solid #4a3a7a;background:#241a44;color:#9db1ff;font-size:12px;cursor:pointer">⚡ 并发 8（点一下 +2）</button>
 </div>
 
@@ -415,7 +416,7 @@ function bindSw(id, key){
     if(key==='running'){ state.running?null:pushLog(); }
     fetch(API+'/control',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({key, enabled:e.target.checked})}).catch(()=>{});
-    const name={running:'生成',fallback:'兜底类',think:'真实思考'}[key];
+    const name={running:'生成',fallback:'兜底类',think:'真实思考',limit:'限流（并发→4）'}[key];
     pushLogCustom(`[warn] 开关变更：${name} ${e.target.checked?'启用':'关闭'}（实时模式下发往生成器）`);
   });
 }
@@ -425,7 +426,7 @@ function pushLogCustom(l){
   const el=$('log');
   el.insertAdjacentHTML('afterbegin',`<div class="${cls}">${t}  ${l}</div>`);
 }
-bindSw('swRun','running'); bindSw('swFallback','fallback'); bindSw('swThink','think');
+bindSw('swRun','running'); bindSw('swFallback','fallback'); bindSw('swThink','think'); bindSw('swLimit','limit');
 
 /* ============ 并发 +2 热切换（点一下 8→10，再点取消回 8）============ */
 let baseW=8, boostOn=false;
@@ -463,6 +464,7 @@ async function tryLive(){
     state.dup=s.dup||0; state.failed=s.failed_batches||0;
     if(typeof s.fallback==='boolean')$('swFallback').checked=s.fallback;
     if(typeof s.think==='boolean')$('swThink').checked=s.think;
+    if(typeof s.limit==='boolean')$('swLimit').checked=s.limit;
     if(typeof s.workers==='number')syncBoostBtn(s.workers, s.base_workers);
     if(typeof s.running==='boolean')$('swRun').checked=s.running;
     if(s.started_at)state.started=Date.parse(s.started_at);
