@@ -11,10 +11,10 @@
 
 | 层 | 内容 | 产出 | 状态 |
 |---|---|---|---|
-| L0 | 约束确认：为什么 0.5B、它翻译过来是什么 | `design/L0_constraints.md` | 🔵 进行中 |
-| L1 | 骨架选择：注意力 / 位置编码 / 归一化 / FFN / embedding 是否共享 | `design/L1_skeleton.md` | 🔵 进行中（2/6：GQA ✅ RoPE ✅） |
-| L2 | 容量分配：500M 怎么分给 hidden / 层数 / 头数 / 中间维度 | `design/L2_capacity.md` | ⬜ |
-| L3 | 落地验证：config → 实例化 → 参数审计 → forward | `design/config_*.json` + `experiments/` | ⬜ |
+| L0 | 约束确认：为什么 0.5B、它翻译过来是什么 | `design/L0_constraints.md` | ✅ |
+| L1 | 骨架选择：注意力 / 位置编码 / 归一化 / FFN / embedding 是否共享 | `design/L1_skeleton.md` | ✅（6/6：GQA / RoPE / RMSNorm-pre / SwiGLU / tie / 无 dropout） |
+| L2 | 容量分配：500M 怎么分给 hidden / 层数 / 头数 / 中间维度 | `design/L2_capacity.md` | ✅（定稿：1280×24×4032，497.8M） |
+| L3 | 落地验证：config → 实例化 → 参数审计 → forward | `design/config_*.json` + `experiments/` | ✅（E1/E2 本地通过；E3 学习用脚本已给） |
 
 > 主 README 里有一张"均衡方案 B"表（上一轮工作坊的成品）。
 > 这次我们一层层重新推，推完和它 diff——推得出来 = 真懂了。

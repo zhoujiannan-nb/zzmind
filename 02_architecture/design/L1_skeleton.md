@@ -115,11 +115,49 @@ RMSNorm = 每个子层入口的"音量旋钮"，weight = 均衡器。
 **参数**：只有 weight 无 bias（所以参数表里 norm 只算 1280/80）。
 全模型 97 个（块内 24×2 + final 1 + q/k_norm 24×2）≈ 66.5K 参数。
 
-### 3.2 为什么 pre-norm（待讲）
-`x = x + Attention(RMSNorm(x))`：这个结构堆 24 层为什么稳、post-norm 为什么难训。
-## 4. FFN 激活 ⬜（SwiGLU vs GELU）
-## 5. embedding 与 lm_head 是否共享（tie）⬜
-## 6. 训练技巧（dropout 等，0.5B 下基本全关）⬜
+### 3.2 为什么 pre-norm（答）
+```
+pre:  x = x + Attention(RMSNorm(x))     ← norm 在残差"进"子层之前
+post: x = RMSNorm(x + Attention(x))     ← norm 压在残差"合"回来之后
+```
+盯残差直通高速公路：
+- **pre-norm**：`x = x + Δ` 这条恒等路径是**纯的**——梯度回流走 `∂x/∂x = 1`，
+  中间没有 norm、没有缩放。每个子层只读一份**归一化拷贝** RMSNorm(x)、写回一个小增量 Δ。
+  24 层里 x 像"内存总线"一样干净地累积信息（业内叫 residual stream = 未归一化的记忆）。
+- **post-norm**：norm 压在**整个和**上，残差路的梯度必须穿过 RMSNorm 的导数（非恒等），
+  而且每层都把累积的记忆**裁剪/重标定**一次 → 穿 24 次 norm，梯度一路打折 → 难训。
+- 实证：原始 Transformer 是 post-norm，必须重 warmup + 小 lr 才训得动；LLaMA 起全线 pre-norm，
+  可以直接上高 lr、少 warmup。模型顶部的 final RMSNorm 是唯一例外的"尾部归一"，只在出最后一层时做一次。
+**一句话**：pre-norm 的残差路保持"干净恒等"，堆多少层梯度都不打折；post-norm 把梯度路和记忆都污染了。
+## 4. FFN 激活 → ✅ SwiGLU（silu 门控，3 张矩阵）
+
+```
+GELU 旧路线：down( gelu( up(x) ) )          2 张矩阵，每条中间神经元"全开"
+SwiGLU 现役：down( silu( gate(x) ) ⊙ up(x) ) 3 张矩阵，gate 决定每条神经元"开多大"
+```
+- **门控是核心**：attention 有软门（softmax），FFN 也配一把闸——`silu(gate(x))` 每个元素 ∈(0,x)，
+  控制 up(x) 里每条"知识线路"放行多少。论文（Shazeer 2020 GLU 变体）实测在同等预算下
+  门控路线比 ReLU/GELU 质量更好，现在 LLaMA/Qwen 全系标配。
+- silu(x)=x·σ(x)：平滑、无死神经元、梯度好。
+- **代价**：多一张矩阵（gate）。我们为它买单——见 L2，FFN 拿总预算是大头，值得。
+- 参数：3×H×I = 15.48M/块（占 Block 的 76%），这是"知识库"本体；
+  attention 是"混音器"只占 ~24%，配比 ≈1:3.15。
+- I=4032 的来历（minimind 源码 line26 就是这个公式）：`I = ceil(H·π/64)·64 = ceil(1280×3.1416/64)×64 = 4032`
+  ——π 是配比经验系数（≈3.14），64 对齐 tensor-core 最小粒度。
+
+## 5. embedding 与 lm_head 共享 → ✅ tie_word_embeddings = true
+
+- 不是"复制"，是**同一张 tensor**：`model.embed_tokens.weight = lm_head.weight`。
+- 省 V×H = 6400×1280 = **8.19M**（全模型第二大项，仅次于 24×FFN）。
+- 额外收益：输出 logits 与输入同空间 = 天然正则（词典不会漂出输入几何）；
+  词表小（6400）+ 同一中文分布下几乎没有损失。LLaMA-2/Qwen 小模型都绑。
+
+## 6. 训练技巧 → ✅ dropout=0.0、bias=False、flash_attn=True
+
+- **dropout 0.0**：0.5B 在 4~5B token 语料上是**欠训练**（研究目标明确：先会说话+格式），
+  dropout 只拖慢收敛；正则需求交给 04/05 后训练阶段去配。
+- **bias=False 全关**：现代标配，省参数、不与归一化抢尺度。
+- **flash_attn=True**：用 torch SDPA（FlashAttention 后端），预训练提速；代码 hasattr 防旧版本。
 
 ## 7. 整体解剖（组件全景）
 
