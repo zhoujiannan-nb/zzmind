@@ -15,6 +15,10 @@
   K 是索引、V 是索引卡片上的内容，按头配对加权求和）。KV cache 按"KV 头"计。详见 §1
 - [决定] 位置编码 = RoPE（base 1e6，max_pos 32768，零参数）：Q/K 按位置旋转，
   点积只依赖相对位置（绝对位置被旋转正交性消掉）；V 不旋转。base 对齐 minimind 源码。详见 §2
+- [理解] 术语："层" = Block（attn 子层 + mlp 子层）；数据流第一站 = Embedding 不是 attention；
+  Block 内 attn 在前、mlp 在后（原始 Transformer 顺序）。详见 L1 §7 全景图
+- [发现] QK-Norm 的位置：q_norm/k_norm = RMSNorm(80)，在 RoPE 之前作用在 Q/K 上
+- [粗算] 一个 Block ≈ 20.4M → 总计 497.8M，落在 C1 预算内（"为什么是这些数"留 L2）
 
 ## 待办
 - [ ] L1 剩余 5 组件：位置编码 / 归一化 / FFN 激活 / tie / 训练技巧

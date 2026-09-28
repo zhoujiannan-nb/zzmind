@@ -87,3 +87,50 @@ RoPE，base = **1e6**（对齐 minimind 源码 `precompute_freqs_cis(rope_base=1
 ## 4. FFN 激活 ⬜（SwiGLU vs GELU）
 ## 5. embedding 与 lm_head 是否共享（tie）⬜
 ## 6. 训练技巧（dropout 等，0.5B 下基本全关）⬜
+
+## 7. 整体解剖（组件全景）
+
+> 回答"从上到下第一层是不是 attention"：**分两层说**。
+> 数据流第一站是 **Embedding**（不是 attention）；所谓"层"（num_hidden_layers=24）
+> 是一个 **Block**，Block 内部第一子层才是 Attention。
+
+```
+input_ids [B,S]（token 编号，整数）
+  │
+  ▼
+① embed_tokens：查表 (6400×1280) → [B,S,1280]          ← 数据流第一站
+  │
+  ▼
+② 24 × Block：
+  │  x = x + Attention(RMSNorm(x))                       ← attn 子层（在前）
+  │       └ q/k/v_proj → q_norm/k_norm(QK-Norm) → RoPE → SDPA → o_proj
+  │  x = x + MLP(RMSNorm(x))                             ← MLP 子层（在后）
+  │       └ silu(gate(x))·up(x) → down(x)  （SwiGLU）
+  │
+  ▼
+③ final RMSNorm
+  │
+  ▼
+④ lm_head（1280→6400，与 ① 共享权重）→ logits [B,S,6400]
+```
+
+minimind 源码坐实（`model_minimind.py`）：
+- **pre-norm**：norm 在每个子层前面，外层 residual 包住（MiniMindBlock.forward）
+- **QK-Norm**：q_norm/k_norm = RMSNorm(head_dim=80)，作用在 Q/K 上、**RoPE 之前**
+  ——主 README 里写的 "QK-Norm" 就是这两行
+- **tie**：`embed_tokens.weight = lm_head.weight`，同一张 tensor
+
+参数初算（L2 的第一次粗算，"为什么是这些值"留 L2 讨论）：
+
+| 组件 | 参数 |
+|---|---|
+| Attn：Q 1.64M + K 0.82M + V 0.82M + O 1.64M + q/k_norm 160 | 4.92M |
+| MLP：gate/up/down × 5.16M | 15.48M |
+| 2×RMSNorm | 2,560 |
+| **一个 Block** | **≈ 20.4M** |
+| × 24 层 | 489.6M |
+| Embedding（与 lm_head 共享，只算一次）6400×1280 | 8.19M |
+| final RMSNorm | 1,280 |
+| **总计** | **≈ 497.8M ✅（落在 C1 预算 450~550M）** |
+
+主 README "≈498M" 的出处就是这张表。
