@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""minicode 多意图路由语料生成器
+"""minicode 多意图路由语料生成器（v3 · 双端点并发）
 用法:
   python3 gen.py init                 # 建 manifest（105 格 × 批次）
   python3 gen.py run [--limit N]      # 生成 + API 服务(7799)；--limit 达到 N 条自动停（pilot 用）
@@ -8,13 +8,26 @@
   python3 gen.py status               # 进度
   python3 gen.py preview TYPE DOMAIN [N]
   touch/删 STOP 文件                 # 优雅停止
+
+v3: 双教师端点（都走 ubasic 平台代理），每端点独立并发窗口，看板热调（/api/control key=endpoint）：
+  A · qwen3.8          默认并发 4
+  B · qwen3.8-node05   默认并发 10
+端点配置存 sqlite kv "endpoints"（JSON 数组），改并发/地址不用重启。
 """
 import json, os, re, sys, time, hashlib, sqlite3, threading, random, urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
-BASE   = "http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8/chat/completions"
-KEY    = "sk-1f4fa08263f1296bcba7aea7828099e0"
-MODEL  = "Qwen3.8-27B-FP8"
+# ---- 教师端点（url 是 base，代码自动拼 /chat/completions；api_key 与平台模型配置一致）----
+DEFAULT_ENDPOINTS = [
+  dict(name="A · qwen3.8",
+       url="http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8",
+       api_key="sk-1f4fa08263f1296bcba7aea7828099e0",
+       model="Qwen3.8-27B-FP8", workers=4),
+  dict(name="B · qwen3.8-node05",
+       url="http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8-node05",
+       api_key="sk-a3b31b6c56ca7bac7776fff704f5e0d6",
+       model="Qwen3.8-27B-FP8", workers=10),
+]
 HERE   = os.path.dirname(os.path.abspath(__file__))
 OUT    = os.path.join(HERE, "routing_multi_intent.jsonl")
 DB     = os.path.join(HERE, "manifest.db")
@@ -22,9 +35,8 @@ LOGF   = os.path.join(HERE, "gen.log")
 STOP   = os.path.join(HERE, "STOP")
 POOL   = os.path.join(HERE, "model_pool.json")
 API_PORT = 7799
-WORKERS, BATCH, TOTAL = 8, 1000, 680000
-MIN_WORKERS, MAX_WORKERS = 2, 12   # 看板"并发+2"热切换：8 ↔ 10，上限 12
-LIMIT_WORKERS = 4                  # 限流开关：白天留算力给别的任务，开启时并发钳到 4（kv "limit"，非破坏性，关闭即恢复）
+BATCH, TOTAL = 1000, 680000
+MIN_W, MAX_W = 0, 16    # 单端点并发范围（0 = 停用该端点）
 THINK_RATIO = 0.20
 # 思考档位：SGLang 官方参数 reasoning_effort（顶层字段）。
 # 服务器实测支持 none/low/medium/xhigh；high/minimal/max → 400。
@@ -95,6 +107,8 @@ DOMAIN_KEYS = list(DOMAINS.keys())
 
 CLOCK = threading.Lock()
 _tok = {"n":0, "t":time.time(), "rate":0.0, "total":0}
+RUN_STATE = {"inflight": []}   # 各端点 in-flight 数（/api/summary 用，run 循环每 tick 刷新）
+
 def tick(n):
     with CLOCK:
         _tok["n"] += n; _tok["total"] += n
@@ -127,7 +141,7 @@ def init_db():
                 for s in range(0, cell_target, BATCH):
                     rows.append((t,d,len(rows),min(BATCH,cell_target-s),"pending"))
         conn.executemany("INSERT INTO batches(type,domain,seq,target,status) VALUES(?,?,?,?,?)", rows)
-    for k,d in [("running","1"),("fallback","1"),("think","1"),("workers",str(WORKERS)),("started",time.time())]:
+    for k,d in [("running","1"),("fallback","1"),("think","1"),("started",time.time())]:
         if not conn.execute("SELECT 1 FROM kv WHERE k=?",(k,)).fetchone(): kv_set(conn,k,d)
     conn.commit()
     nb = conn.execute("SELECT COUNT(*) c FROM batches").fetchone()["c"]
@@ -136,6 +150,30 @@ def init_db():
 
 def load_pool():
     with open(POOL,encoding="utf-8") as f: return json.load(f)["models"]
+
+# ---- 端点配置（kv "endpoints" = JSON 数组；热更新不重启）----
+def ep_url(ep): return ep["url"].rstrip("/") + "/chat/completions"
+
+def get_eps(conn):
+    raw = kv_get(conn, "endpoints", "")
+    if raw:
+        try:
+            eps = json.loads(raw)
+            if isinstance(eps, list) and eps and all(isinstance(e, dict) and e.get("url") for e in eps):
+                for e in eps:
+                    e.setdefault("name", e["url"]); e.setdefault("api_key", "")
+                    e.setdefault("model", "Qwen3.8-27B-FP8"); e.setdefault("workers", 0)
+                return eps
+        except Exception:
+            pass
+    return [dict(e) for e in DEFAULT_ENDPOINTS]
+
+def set_eps(conn, eps): kv_set(conn, "endpoints", json.dumps(eps, ensure_ascii=False))
+
+def clamp_w(v):
+    try: v = int(v)
+    except (ValueError, TypeError): v = 0
+    return max(MIN_W, min(MAX_W, v))
 
 def pick_cards(pool):
     k = random.choice([2,3,3,3,4,4,5])
@@ -172,27 +210,30 @@ def build_prompt(t,d,seed,cards,use_think):
 【类型要求】{tinfo["req"]}
 【要求】用户请求要像真实用户说话；{think_line}全样本 150~600 字；工具结果要具体（有真实感的条目）。"""
 
-def call_27b(prompt, think_level=None, max_tokens=900):
-    body = {"model": MODEL, "messages":[{"role":"user","content":prompt}],
+def call_27b(ep, prompt, think_level=None, max_tokens=900):
+    body = {"model": ep.get("model") or "Qwen3.8-27B-FP8",
+            "messages":[{"role":"user","content":prompt}],
             "max_tokens": max(max_tokens, THINK_MAX[think_level]) if think_level else max_tokens,
             "temperature": 0.9}
     if think_level:
         body["reasoning_effort"] = think_level          # SGLang 官方思考档位（低/中/高）
     else:
         body["chat_template_kwargs"] = {"enable_thinking": False}
-    req = urllib.request.Request(BASE, data=json.dumps(body).encode(),
-          headers={"Authorization":f"Bearer {KEY}","Content-Type":"application/json"})
+    req = urllib.request.Request(ep_url(ep), data=json.dumps(body).encode(),
+          headers={"Authorization":f"Bearer {ep.get('api_key','')}","Content-Type":"application/json"})
     for attempt in range(4):  # 首发 1 次 + 重试 3 次
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
                 d = json.loads(r.read())
+            if "choices" not in d:
+                raise RuntimeError("no_choices: %s" % str(d.get("error", d))[:120])  # 平台错误体（节点离线等）
             n = d.get("usage",{}).get("completion_tokens",0) or 0
             n += d.get("usage",{}).get("reasoning_tokens",0) or 0  # 思考 token 也计入吞吐
             tick(n)
             return d["choices"][0]["message"].get("content","")  # 只取 content（思考在 reasoning_content）
         except Exception as e:
             if attempt == 3:
-                log(f"[warn] API 3 次重试仍失败: {e}")
+                log(f"[warn] 端点 {ep.get('name','?')} 3 次重试仍失败: {e}")
                 raise
             time.sleep(random.uniform(3, 7))  # 并发撞限流/坏参：随机睡 3~7s 再试
 
@@ -209,16 +250,18 @@ def validate(t, text, cards):
     if not (120 <= len(text) <= 900): return False, "len"
     return True, "ok"
 
-def gen_one(pool, seen, t=None, d=None):
+def gen_one(pool, seen, t=None, d=None, ep_idx=0):
     lc = db()  # 本线程独立连接：跨线程共享 conn 会触发 SQLITE_MISUSE("bad parameter or other API misuse")
     try:
+        eps = get_eps(lc)
+        ep = eps[ep_idx % len(eps)]
         for _ in range(4):
             t = t or random.choice([k for k in TYPE_KEYS if not (k=="fallback" and kv_get(lc,"fallback","1")=="0")])
             d = d or random.choice(DOMAIN_KEYS)
             seed = random.choice(DOMAINS[d])
             cards = pick_cards(pool)
             think_level = random.choice(THINK_MAP[t]) if (kv_get(lc,"think","1")=="1" and random.random() < THINK_RATIO) else None
-            text = call_27b(build_prompt(t,d,seed,cards,bool(think_level)), think_level)
+            text = call_27b(ep, build_prompt(t,d,seed,cards,bool(think_level)), think_level)
             ok, why = validate(t, text, cards)
             if ok:
                 h = hashlib.sha1(text.encode()).hexdigest()
@@ -254,104 +297,110 @@ def next_batch(conn, limit_done):
         if r: return r
     return None
 
-def cur_workers(conn):
-    try: w = int(kv_get(conn, "workers", str(WORKERS)))
-    except (ValueError, TypeError): w = WORKERS
-    w = max(MIN_WORKERS, min(MAX_WORKERS, w))
-    if kv_get(conn, "limit", "0") == "1":  # 限流开关：钳到 4，不动 kv workers（关掉立即恢复）
-        w = min(w, LIMIT_WORKERS)
-    return w
+def next_free_batch(conn):
+    b = next_batch(conn, None)
+    if b and kv_get(conn,"fallback","1")=="0" and b["type"]=="fallback":
+        b = conn.execute("SELECT * FROM batches WHERE status='pending' AND type!='fallback' ORDER BY id LIMIT 1").fetchone()
+    return b
 
 def run(limit=None, smoke=False):
     init_db()
     pool = load_pool()
     seen = load_seen()
     conn = db()
-    W = cur_workers(conn)
-    log(f"[run] 开始：workers={W}（可调 {MIN_WORKERS}~{MAX_WORKERS}）limit={limit or '全部'} smoke={smoke} out={OUT}")
+    eps0 = get_eps(conn)
+    wsum0 = sum(clamp_w(e.get("workers")) for e in eps0)
+    log("[run] 开始：端点 " + " ".join(f"{e.get('name')}(w={clamp_w(e.get('workers'))})" for e in eps0)
+        + f" 总并发 {wsum0}（单端点热调 {MIN_W}~{MAX_W}，看板可改）limit={limit or '全部'} smoke={smoke} out={OUT}")
     t0 = time.time(); made = 0
-    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-    inflight = []          # [(Future, batch_row|None)] 滑动并发窗口，大小热更新
+    ex = ThreadPoolExecutor(max_workers=max(8, wsum0*2 + 8))
+    inflight = [[] for _ in eps0]   # 每端点一个滑动并发窗口
     last_logged = [None]
 
-    def submit_to(target_n):
-        """把 inflight 补到 target_n 并发。返回是否还有活"""
-        while len(inflight) < target_n:
-            if limit and made >= limit: return False
-            if smoke:
-                inflight.append((ex.submit(gen_one, pool, seen, None, None), None))
-                continue
-            b = next_batch(conn, None)
-            if b and kv_get(conn,"fallback","1")=="0" and b["type"]=="fallback":
-                b = conn.execute("SELECT * FROM batches WHERE status='pending' AND type!='fallback' ORDER BY id LIMIT 1").fetchone()
-            if not b: return False
-            rem = b["target"] - b["done"]
-            if rem <= 0:
-                if b["status"] != "done":
-                    conn.execute("UPDATE batches SET status='done', updated=? WHERE id=?", (time.time(), b["id"])); conn.commit()
-                continue
-            if b["id"] != last_logged[0]:
-                last_logged[0] = b["id"]
-                log(f"[run] 批次 {b['type']}/{b['domain']} #{b['seq']:04d} 生成（已 {b['done']}/{b['target']}，并发窗口→{target_n}）")
-            if b["status"] != "running":
-                conn.execute("UPDATE batches SET status='running', updated=? WHERE id=?", (time.time(), b["id"])); conn.commit()
-            for _ in range(min(rem, target_n - len(inflight))):
-                inflight.append((ex.submit(gen_one, pool, seen, b["type"], b["domain"]), b))
-        return True
-
     try:
-        last_made = 0; last_made_t = time.time(); last_w = W
+        last_made = 0; last_made_t = time.time(); last_w = None
         while True:
             if os.path.exists(STOP): log("[run] 检测到 STOP，优雅退出"); break
             paused = (not smoke) and kv_get(conn,"running","1")=="0"
+            eps = get_eps(conn)                       # 热读端点配置（并发/地址/key）
+            while len(inflight) < len(eps): inflight.append([])
+            del inflight[len(eps):]
+            RUN_STATE["inflight"] = [len(w) for w in inflight]
+            wsum = sum(clamp_w(e.get("workers")) for e in eps)
+            if last_w is not None and wsum != last_w:
+                log("[warn] 端点并发变更 %d → %d " % (last_w, wsum)
+                    + " ".join(f"{eps[i].get('name','?')}={clamp_w(eps[i].get('workers'))}" for i in range(len(eps))))
+            last_w = wsum
             # 1) 收割完成的样本
-            kept = []
-            for it in inflight:
-                fu, brow = it
-                if not fu.done(): kept.append(it); continue
-                try: rec = fu.result()
-                except Exception as e: log(f"[err] 样本生成异常: {e}"); continue
-                if not rec:
-                    kv_set(conn, "dup", int(kv_get(conn,"dup","0"))+1); continue
-                with CLOCK:
-                    with open(OUT_P if rec["type"]=="persona" else OUT, "a", encoding="utf-8") as out:
-                        out.write(json.dumps(rec,ensure_ascii=False)+"\n"); out.flush()
-                    made += 1
-                if brow is not None:
-                    conn.execute("UPDATE batches SET done=done+1, updated=? WHERE id=?", (time.time(), brow["id"]))
-                    nd = conn.execute("SELECT done,target FROM batches WHERE id=?",(brow["id"],)).fetchone()
-                    if nd["done"] >= nd["target"]:
-                        conn.execute("UPDATE batches SET status='done' WHERE id=?",(brow["id"],))
-                        log(f"[ok] 批次 {brow['type']}/{brow['domain']} #{brow['seq']:04d} 完成（吞吐 {_tok['rate']:.0f} tok/s）")
-                    conn.commit()
-            inflight = kept
+            for i in range(len(inflight)):
+                win, inflight[i] = inflight[i], []
+                for it in win:
+                    fu, brow = it
+                    if not fu.done(): inflight[i].append(it); continue
+                    try: rec = fu.result()
+                    except Exception as e: log(f"[err] 样本生成异常（{eps[i].get('name','?')}）: {e}"); continue
+                    if not rec:
+                        kv_set(conn, "dup", int(kv_get(conn,"dup","0"))+1); continue
+                    with CLOCK:
+                        with open(OUT_P if rec["type"]=="persona" else OUT, "a", encoding="utf-8") as out:
+                            out.write(json.dumps(rec,ensure_ascii=False)+"\n"); out.flush()
+                        made += 1
+                    if brow is not None:
+                        conn.execute("UPDATE batches SET done=done+1, updated=? WHERE id=?", (time.time(), brow["id"]))
+                        nd = conn.execute("SELECT done,target FROM batches WHERE id=?",(brow["id"],)).fetchone()
+                        if nd["done"] >= nd["target"]:
+                            conn.execute("UPDATE batches SET status='done' WHERE id=?",(brow["id"],))
+                            log(f"[ok] 批次 {brow['type']}/{brow['domain']} #{brow['seq']:04d} 完成（吞吐 {_tok['rate']:.0f} tok/s）")
+                        conn.commit()
             # 2) limit 达标
             if limit and made >= limit:
                 log(f"[run] 达到 limit={limit}，退出"); break
-            # 3) 热读并发数 + 补窗口
-            W = cur_workers(conn)
-            if W != last_w: log(f"[warn] 并发热更新 {last_w} → {W}"); last_w = W
-            has_work = (not paused) and submit_to(W)
+            # 3) 补窗口（每端点独立窗口，同批次可跨端点并行）
+            has_work = False
+            if not paused:
+                b = next_free_batch(conn)
+                if b:
+                    has_work = True
+                    for i in range(len(eps)):
+                        wi = clamp_w(eps[i].get("workers"))
+                        if wi == 0: continue
+                        while len(inflight[i]) < wi:
+                            rem = b["target"] - b["done"]
+                            if rem <= 0:
+                                if b["status"] != "done":
+                                    conn.execute("UPDATE batches SET status='done', updated=? WHERE id=?", (time.time(), b["id"])); conn.commit()
+                                b = next_free_batch(conn)
+                                if not b: break
+                            if b["id"] != last_logged[0]:
+                                last_logged[0] = b["id"]
+                                log(f"[run] 批次 {b['type']}/{b['domain']} #{b['seq']:04d} 生成（已 {b['done']}/{b['target']}，总窗口→{wsum}）")
+                            if b["status"] != "running":
+                                conn.execute("UPDATE batches SET status='running', updated=? WHERE id=?", (time.time(), b["id"])); conn.commit()
+                            if smoke:
+                                inflight[i].append((ex.submit(gen_one, pool, seen, None, None, i), None))
+                            else:
+                                inflight[i].append((ex.submit(gen_one, pool, seen, b["type"], b["domain"], i), b))
             # 4) 没活且窗口空 → 结束
-            if not inflight and not has_work and not paused:
+            if not any(inflight) and not has_work and not paused:
                 log("[run] 全部批次完成！"); break
-            # 5) 无产出保护（API 挂了别空转）
+            # 5) 无产出保护（API 挂了别空转；全端点并发=0 时是软暂停，不触发）
             if made != last_made:
                 last_made = made; last_made_t = time.time()
-            elif not paused and time.time() - last_made_t > 300:
+            elif not paused and wsum > 0 and time.time() - last_made_t > 300:
                 log(f"[err] 5 分钟无产出，退出（检查 API/网络）"); break
             time.sleep(0.4)
     finally:
-        for it in inflight:
-            try: rec = it[0].result()
-            except Exception: continue
-            if rec:
-                with CLOCK:
-                    with open(OUT_P if rec["type"]=="persona" else OUT, "a", encoding="utf-8") as out:
-                        out.write(json.dumps(rec,ensure_ascii=False)+"\n"); out.flush()
-                if it[1] is not None:
-                    conn.execute("UPDATE batches SET done=done+1, updated=? WHERE id=?", (time.time(), it[1]["id"]))
-                    conn.commit()
+        for win in inflight:
+            for it in win:
+                try: rec = it[0].result()
+                except Exception: continue
+                if rec:
+                    with CLOCK:
+                        with open(OUT_P if rec["type"]=="persona" else OUT, "a", encoding="utf-8") as out:
+                            out.write(json.dumps(rec,ensure_ascii=False)+"\n"); out.flush()
+                    if it[1] is not None:
+                        conn.execute("UPDATE batches SET done=done+1, updated=? WHERE id=?", (time.time(), it[1]["id"]))
+                        conn.commit()
         ex.shutdown(wait=True)
         log(f"[run] 结束：本次 {made} 条，用时 {dur(time.time()-t0)}")
 
@@ -361,6 +410,8 @@ def dur(s):
 
 def status():
     conn = db()
+    eps = get_eps(conn)
+    print("教师端点: " + " | ".join(f"{e.get('name')}(w={clamp_w(e.get('workers'))})" for e in eps))
     rows = conn.execute("""SELECT type, COUNT(*) n, SUM(done) dn, SUM(target) tt,
         SUM(status='done') dn2, SUM(status='running') r, SUM(status='pending') p, SUM(status='failed') fl
         FROM batches GROUP BY type""").fetchall()
@@ -386,21 +437,35 @@ def make_handler():
         def do_POST(self):
             ln = int(self.headers.get("Content-Length",0))
             d = json.loads(self.rfile.read(ln) or b"{}")
-            if self.path == "/api/control":
-                conn = db()
-                key = d.get("key","")
-                if key == "workers":
-                    v = str(min(MAX_WORKERS, WORKERS+2)) if d.get("enabled") else str(WORKERS)
-                else:
-                    v = "1" if d.get("enabled") else "0"
+            conn = db()
+            key = d.get("key","")
+            if key == "endpoint":
+                idx = d.get("idx")
+                try: idx = int(idx)
+                except (TypeError, ValueError): idx = -1
+                eps = get_eps(conn)
+                if 0 <= idx < len(eps) and any(d.get(k) is not None for k in ("url","name","model","api_key","workers")):
+                    if d.get("url") is not None: eps[idx]["url"] = str(d["url"]).strip()
+                    if d.get("name") is not None and str(d["name"]).strip(): eps[idx]["name"] = str(d["name"]).strip()
+                    if d.get("model") is not None: eps[idx]["model"] = str(d["model"]).strip()
+                    if d.get("api_key") is not None: eps[idx]["api_key"] = str(d["api_key"]).strip()
+                    if d.get("workers") is not None: eps[idx]["workers"] = clamp_w(d["workers"])
+                    set_eps(conn, eps)
+                    log(f"[warn] 端点配置变更 web: {eps[idx].get('name')} workers={eps[idx]['workers']} url={eps[idx].get('url')}")
+                self._send({"ok": True, "endpoints": get_eps(conn)})
+            elif key in ("running", "fallback", "think"):
+                v = "1" if d.get("enabled") else "0"
                 kv_set(conn, key, v)
                 log(f"[warn] 开关变更 web: {key} = {v}")
-                self._send({"ok":True, "workers": cur_workers(conn)})
-            else: self._send({"err":"nf"},404)
+                self._send({"ok": True})
+            else:
+                self._send({"err":"nf"},404)
         def do_GET(self):
             from urllib.parse import urlparse, parse_qs
             u = urlparse(self.path); q = parse_qs(u.query)
             conn = db()
+            eps = get_eps(conn)
+            infl = RUN_STATE.get("inflight") or [0]*len(eps)
             if u.path == "/api/summary":
                 tt = conn.execute("SELECT COALESCE(SUM(target),0) t, COALESCE(SUM(done),0) d, SUM(status='failed') fl FROM batches").fetchone()
                 st = float(kv_get(conn,"started",time.time()))
@@ -409,8 +474,9 @@ def make_handler():
                 self._send({"running": kv_get(conn,"running","1")=="1",
                             "fallback": kv_get(conn,"fallback","1")=="1",
                             "think": kv_get(conn,"think","1")=="1",
-                            "limit": kv_get(conn,"limit","0")=="1",
-                            "workers": cur_workers(conn), "base_workers": WORKERS, "max_workers": MAX_WORKERS,
+                            "workers": sum(clamp_w(e.get("workers")) for e in eps),
+                            "endpoints": [dict(name=e.get("name"), url=e.get("url"), workers=clamp_w(e.get("workers")),
+                                                inflight=infl[i] if i < len(infl) else 0) for i,e in enumerate(eps)],
                             "generated": made, "target": tt["t"],
                             "throughput_tps": round(_tok["rate"],1),
                             "tokens": _tok["total"], "dup": 0,

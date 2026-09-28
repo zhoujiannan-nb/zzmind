@@ -128,7 +128,7 @@
   <span class="badge demo" id="modeBadge">演示数据</span>
   <span class="badge run" id="stateBadge">● 生成中</span>
   <span class="who">人设 minicode（智子风）· 制作人 zhoujiannan-nb</span>
-  <span class="right">目标 680,000 条 · 105 格大纲（7 类 × 15 领域）· 并发 8（可热调）· 27B 教师模型</span>
+  <span class="right">目标 680,000 条 · 105 格大纲（7 类 × 15 领域）· 双教师端点并发（热调）· 27B 教师模型</span>
 </div>
 
 <div class="ctrl">
@@ -136,8 +136,28 @@
   <label class="sw"><input type="checkbox" id="swRun" checked><span class="tr"></span>生成运行</label>
   <label class="sw"><input type="checkbox" id="swFallback" checked><span class="tr"></span>兜底类（判断不了→不硬选）</label>
   <label class="sw"><input type="checkbox" id="swThink" checked><span class="tr"></span>真实思考 20%</label>
-  <label class="sw"><input type="checkbox" id="swLimit"><span class="tr"></span>限流（白天留算力，并发→4）</label>
-  <button id="btnBoost" style="margin-left:10px;padding:6px 14px;border-radius:8px;border:1px solid #4a3a7a;background:#241a44;color:#9db1ff;font-size:12px;cursor:pointer">⚡ 并发 8（点一下 +2）</button>
+</div>
+
+<div class="ctrl" style="display:block">
+  <span class="t">教师端点（走 ubasic 平台代理 · 独立并发窗口，改完点应用即热生效，0 = 停用该端点）</span>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px">
+    <div style="flex:1;min-width:340px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b id="epName0" style="font-size:12px;white-space:nowrap">A · qwen3.8</b>
+      <input id="epUrl0" class="mono" type="text" style="flex:1;min-width:180px;background:#0b0f17;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px 8px;font-size:11px">
+      <span class="t">并发</span>
+      <input id="epW0" type="number" min="0" max="16" value="4" style="width:54px;background:#0b0f17;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px;font-size:12px">
+      <button id="epBtn0" style="padding:6px 14px;border-radius:8px;border:1px solid #14532d;background:#052e16;color:#4ade80;font-size:12px;cursor:pointer">应用</button>
+      <span id="epLive0" class="badge stop" style="font-size:11px">在飞 0/4</span>
+    </div>
+    <div style="flex:1;min-width:340px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b id="epName1" style="font-size:12px;white-space:nowrap">B · qwen3.8-node05</b>
+      <input id="epUrl1" class="mono" type="text" style="flex:1;min-width:180px;background:#0b0f17;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px 8px;font-size:11px">
+      <span class="t">并发</span>
+      <input id="epW1" type="number" min="0" max="16" value="10" style="width:54px;background:#0b0f17;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px;font-size:12px">
+      <button id="epBtn1" style="padding:6px 14px;border-radius:8px;border:1px solid #14532d;background:#052e16;color:#4ade80;font-size:12px;cursor:pointer">应用</button>
+      <span id="epLive1" class="badge stop" style="font-size:11px">在飞 0/10</span>
+    </div>
+  </div>
 </div>
 
 <div class="kpis">
@@ -416,7 +436,7 @@ function bindSw(id, key){
     if(key==='running'){ state.running?null:pushLog(); }
     fetch(API+'/control',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({key, enabled:e.target.checked})}).catch(()=>{});
-    const name={running:'生成',fallback:'兜底类',think:'真实思考',limit:'限流（并发→4）'}[key];
+    const name={running:'生成',fallback:'兜底类',think:'真实思考'}[key];
     pushLogCustom(`[warn] 开关变更：${name} ${e.target.checked?'启用':'关闭'}（实时模式下发往生成器）`);
   });
 }
@@ -426,25 +446,44 @@ function pushLogCustom(l){
   const el=$('log');
   el.insertAdjacentHTML('afterbegin',`<div class="${cls}">${t}  ${l}</div>`);
 }
-bindSw('swRun','running'); bindSw('swFallback','fallback'); bindSw('swThink','think'); bindSw('swLimit','limit');
+bindSw('swRun','running'); bindSw('swFallback','fallback'); bindSw('swThink','think');
 
-/* ============ 并发 +2 热切换（点一下 8→10，再点取消回 8）============ */
-let baseW=8, boostOn=false;
-function syncBoostBtn(w,b){ if(b) baseW=b; if(!w) return;
-  boostOn = w > baseW;
-  $('btnBoost').textContent = boostOn ? `⚡ 并发 ${w}（已加速，点一下取消）` : `⚡ 并发 ${w}（点一下 +2）`;
+/* ============ 教师端点配置（独立并发，热生效）============ */
+const EP_N = 2;
+const EP_DEFAULTS = [
+  {name:'A · qwen3.8',        url:'http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8',        workers:4},
+  {name:'B · qwen3.8-node05', url:'http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8-node05', workers:10},
+];
+function syncEps(eps){
+  (eps||[]).slice(0,EP_N).forEach((e,i)=>{
+    if(document.activeElement !== $('epUrl'+i)) $('epUrl'+i).value = e.url||'';
+    if(document.activeElement !== $('epW'+i))   $('epW'+i).value = e.workers;
+    $('epName'+i).textContent = e.name||('EP'+i);
+    const inf = e.inflight||0, w = e.workers||0;
+    $('epLive'+i).textContent = `在飞 ${inf}/${w}`;
+    $('epLive'+i).className = 'badge ' + (inf>0?'run':'stop');
+  });
 }
-$('btnBoost').addEventListener('click',()=>{
-  const target=!boostOn, b=$('btnBoost');
-  b.textContent='⚡ 切换中…';
+function epApply(idx){
+  const url = $('epUrl'+idx).value.trim();
+  const w = $('epW'+idx).value;
+  const btn = $('epBtn'+idx);
+  if(!url){ pushLogCustom('[err] 端点地址不能为空'); return; }
+  btn.textContent='应用中…';
   fetch(API+'/control',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:'workers',enabled:target})})
+    body:JSON.stringify({key:'endpoint', idx, url, workers:w})})
     .then(r=>r.json()).then(d=>{
-      syncBoostBtn(d.workers);
-      pushLogCustom(`[warn] 开关变更：并发 ${target?'加速 +2':'取消 +2'}（实时生效，无需重启）`);
+      if(Array.isArray(d.endpoints)) syncEps(d.endpoints);
+      pushLogCustom(`[warn] 端点配置变更：端点${idx} 并发→${w}（热生效，无需重启）`);
     })
-    .catch(()=>{ b.textContent=boostOn?'⚡ 取消 +2 失败，再点':'⚡ +2 失败，再点'; });
-});
+    .catch(()=>pushLogCustom('[err] 端点配置下发失败，再点一次'))
+    .finally(()=>{ btn.textContent='应用'; });
+}
+for(let i=0;i<EP_N;i++){
+  $('epUrl'+i).value = EP_DEFAULTS[i].url;
+  $('epW'+i).value = EP_DEFAULTS[i].workers;
+  $('epBtn'+i).addEventListener('click',()=>epApply(i));
+}
 
 /* ============ 实时 API（服务器就绪后自动切换） ============
    生成器（node05:7799，CORS *）暴露：
@@ -464,8 +503,7 @@ async function tryLive(){
     state.dup=s.dup||0; state.failed=s.failed_batches||0;
     if(typeof s.fallback==='boolean')$('swFallback').checked=s.fallback;
     if(typeof s.think==='boolean')$('swThink').checked=s.think;
-    if(typeof s.limit==='boolean')$('swLimit').checked=s.limit;
-    if(typeof s.workers==='number')syncBoostBtn(s.workers, s.base_workers);
+    if(Array.isArray(s.endpoints)) syncEps(s.endpoints);
     if(typeof s.running==='boolean')$('swRun').checked=s.running;
     if(s.started_at)state.started=Date.parse(s.started_at);
     for(const rc of c){const c2=cells.find(x=>x.type===rc.type&&x.domain===rc.domain);

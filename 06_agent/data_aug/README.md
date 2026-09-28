@@ -5,6 +5,22 @@
 > 合成任务当前在 **node05** 上持续运行（`/mnt/boot/datasets/zzmind/data_aug/gen.py`），
 > 通过 **txy:7788** 看板远程监控（http://124.223.88.17:7788/）。
 
+## 双教师端点（v3，2026-09-28 上）
+
+两个 27B 教师实例，**都走 ubasic 平台代理**（过平台计费/管理，不直连），每端点独立并发窗口、看板热调：
+
+| 端点 | 平台代理地址 | 后端 | 默认并发 | 备注 |
+|---|---|---|---|---|
+| A · qwen3.8 | `http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8` | 原教师节点 | 4 | 白天留算力给 node05 其他任务 |
+| B · qwen3.8-node05 | `http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8-node05` | node05 本机 SGLang（`/home/ai-servers/Qwen3.8-27B-FP8`，nginx 9007 → sglang 8081，v24 配置 TP2+DFLASH） | 10 | 09-28 上线；node05 重启后平台曾报"计算节点离线/502"，节点恢复后需平台侧重查转发 |
+
+- 端点配置存 `manifest.db` kv 表 `endpoints`（JSON 数组：name/url/api_key/model/workers），
+  看板改并发/地址 → `POST /api/control {key:"endpoint", idx, workers|url|api_key}` → **热生效不重启**
+- 单端点并发范围 0~16（0 = 停用该端点，流量自动全走另一端）；总窗口 = 各端点之和
+- 某端点挂了（502/离线）：该端点样本重试 3 次后丢弃重排，不影响另一端产出；
+  平台错误体（`{"error":...}` 无 choices）也按失败重试
+- 端点 api_key 在 `C:\Users\flycat666\.mini_code\config.json` 的 models 列表里可查（与平台模型一一对应）
+
 ## 三机架构
 
 ```
@@ -29,10 +45,12 @@ node05 (116.148.192.34:8002)                 txy (124.223.88.17)
 
 | 文件 | 作用 |
 |---|---|
-| `gen.py` | 合成引擎（v2，当前在跑）：manifest 调度 + 并发窗口 + 校验去重 + Web API(7799) |
-| `gen.py.bak_v1` | v1 存档：无思考档位、`enable_thinking` 布尔开关、固定重试 2/4s |
+| `gen.py` | 合成引擎（v3 双端点，当前在跑）：manifest 调度 + 双端点独立并发窗口 + 校验去重 + Web API(7799) |
+| `gen.py.bak_v1` | v1 存档：无思考档位、`enable_thinking` 布尔开关、固定重试 |
+| `gen.py.bak_v2_limit` | v2 存档：单端点 + 全局 workers/limit 开关（node05 上另有 bak_v3_keybug/bak_v3a 过渡版） |
 | `model_pool.json` | 50 个教师模型卡片池（GPTQA 分 + 擅长领域），每条样本随机抽 2~5 张当"可用模型" |
-| `dashboard/index.html` | 单文件看板（7 类型 × 15 领域格子矩阵 + KPI + 开关 + 日志 + 样本预览） |
+| `start_gen.sh` | 启动脚本：rm STOP + nohup 拉起 |
+| `dashboard/index.html` | 单文件看板（7 类型 × 15 领域格子矩阵 + KPI + 开关 + 双端点配置 + 日志 + 样本预览） |
 | `dashboard/txy_proxy.py` | txy:7788 服务：静态目录 + `/api/*` 反代到 127.0.0.1:7799 |
 | `dashboard/API.md` | 看板 API 契约（summary/cells/preview/log/control） |
 
@@ -52,10 +70,11 @@ node05 (116.148.192.34:8002)                 txy (124.223.88.17)
 - **输出**：persona 类单独落 `persona_posttrain.jsonl`（人设重复是零信息量，不进预训练，留给后训练），
   其余进 `routing_multi_intent.jsonl`
 - **热开关**（sqlite kv 表，/api/control 或看板操作）：`running` 启停 / `fallback` 兜底类 /
-  `think` 真实思考 / `workers` 并发（2~12，热更新滑动窗口）/ `limit` **限流开关**（白天留算力，
-  开启时并发钳到 `LIMIT_WORKERS=4`，不动 workers 值，关闭立即恢复）
-- **启动脚本**：`start_gen.sh`（rm STOP + nohup 拉起，2026-09-28 node05 失联后重启用它）
-- **保护**：5 分钟无产出自动退出（API 挂了别空转）；touch `STOP` 文件优雅停止
+  `think` 真实思考 / `endpoints` **双端点配置**（每端点 url/api_key/model/workers，0~16，热生效）
+- **保护**：5 分钟无产出自动退出（API 挂了别空转；全端点并发=0 时是软暂停不触发）；
+  touch `STOP` 文件优雅停止
+- **node05 教师服务**：`/home/ai-servers/Qwen3.8-27B-FP8/`（start.sh 自动拉起 vllm_guard 防抢卡；
+  健康端点 `/health`；chat 路由 `/v1/chat/completions`；9 并发槽 mamba48/5）
 
 ## 运行手册
 
@@ -81,24 +100,23 @@ python3 txy_proxy.py &        # :7788 → 127.0.0.1:7799
 注意：`gen.py` 顶部硬编码了教师 API 地址和 KEY（内网代理，密钥可暴露级别 = 内网）。
 `BASE/KEY/MODEL` 换教师模型时改这三行。
 
-## 当前状态（2026-09-28 接手时）
+## 当前状态（2026-09-28 10:45 更新）
 
-- ⚠️ **node05 当日 09:24 起失联**（k8s 节点 zone76-node05 NotReady，09:18 最后心跳；
-  机器 ping 得通但 sshd/kubelet 用户态服务卡死，疑似宿主机 I/O 或资源问题，待运维/宿主机控制台处理）
-- 失联前：旧进程 09:22:51 优雅退出（in-flight 全收齐，数据一致）；新进程未及启动
-- 失联前进度：145,064 / 680,000（21.3%）
+- 进程：`python3 gen.py run`（v3 双端点，PID 17908，node05 10:05 重启后于 10:45 拉起）
+- 端点：A(w=4) 正常产出 ~370-1100 tok/s；B(w=10) 窗口占满，平台代理 502（node05 重启后
+  平台侧转发未恢复，**待平台重查 qwen3.8-node05 → node05:9007 的注册/转发**，恢复后自动开跑）
+- 进度：145,359 / 680,000（21.4%），断点续跑批次 normal/中文写作 #0161
   - simple 118,831/122,400（收尾，5 批 failed——重复率太高没填满，可接受）
-  - normal 26,233/149,595（进行中）
-  - complex/fuzzy/fallback/self/persona 未开始
-- 吞吐：约 700~1100 tok/s（并发 8，看板可 +2 到 10）
 - 数据文件：`routing_multi_intent.jsonl` ~423MB / 14.5 万行，`persona_posttrain.jsonl` 49 行
 
-### node05 恢复后重启清单
+### 重启/操作清单
 
 ```bash
-ssh node05 "ps aux | grep 'gen.py run' | grep -v grep"      # 1. 看进程是否还活着（I/O 卡死时可能假活）
-ssh node05 "bash /mnt/boot/datasets/zzmind/data_aug/start_gen.sh"   # 2. 没跑就拉起来
-# 3. 看板 http://124.223.88.17:7788/ 勾"限流（并发→4）"→ 白天留算力；跑完别的事再取消
+ssh node05 "ps aux | grep 'gen.py run' | grep -v grep"          # 看进程
+ssh node05 "bash /mnt/boot/datasets/zzmind/data_aug/start_gen.sh"   # 没跑就拉起（rm STOP + nohup）
+# 改并发/地址：看板 http://124.223.88.17:7788/ 教师端点区，改完点"应用"即热生效
+# 或命令行:
+curl -X POST http://127.0.0.1:7799/api/control -d '{"key":"endpoint","idx":1,"workers":6}'
 ```
 
 ## 接手待办
