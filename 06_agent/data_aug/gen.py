@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""minicode 多意图路由语料生成器
+用法:
+  python3 gen.py init                 # 建 manifest（105 格 × 批次）
+  python3 gen.py run [--limit N]      # 生成 + API 服务(7799)；--limit 达到 N 条自动停（pilot 用）
+  python3 gen.py smoke [N]            # 快速冒烟（默认 60 条，不占 manifest 配额）
+  python3 gen.py status               # 进度
+  python3 gen.py preview TYPE DOMAIN [N]
+  touch/删 STOP 文件                 # 优雅停止
+"""
+import json, os, re, sys, time, hashlib, sqlite3, threading, random, urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE   = "http://ubasic.yuanshi-sec.com:5708/proxy/model/qwen3.8/chat/completions"
+KEY    = "sk-1f4fa08263f1296bcba7aea7828099e0"
+MODEL  = "Qwen3.8-27B-FP8"
+HERE   = os.path.dirname(os.path.abspath(__file__))
+OUT    = os.path.join(HERE, "routing_multi_intent.jsonl")
+DB     = os.path.join(HERE, "manifest.db")
+LOGF   = os.path.join(HERE, "gen.log")
+STOP   = os.path.join(HERE, "STOP")
+POOL   = os.path.join(HERE, "model_pool.json")
+API_PORT = 7799
+WORKERS, BATCH, TOTAL = 8, 1000, 680000
+MIN_WORKERS, MAX_WORKERS = 2, 12   # 看板"并发+2"热切换：8 ↔ 10，上限 12
+THINK_RATIO = 0.20
+# 思考档位：SGLang 官方参数 reasoning_effort（顶层字段）。
+# 服务器实测支持 none/low/medium/xhigh；high/minimal/max → 400。
+# 按样本类型细分：复杂题用高档，简单题用低档（工厂 prompt 下思考链偏长，需匹配预算）
+THINK_MAP = {
+    "simple":   ["low", "low", "medium"],
+    "normal":   ["low", "medium", "medium"],
+    "complex":  ["medium", "medium", "xhigh"],
+    "self":     ["low", "low"],
+    "fuzzy":    ["low", "medium"],
+    "fallback": ["medium", "xhigh"],
+    "persona":  ["low", "medium"],
+}
+THINK_MAX = {"low": 2000, "medium": 2600, "xhigh": 3600}  # 各档 max_tokens（思考+content 总预算）
+
+IDENTITY = ("你是 minicode，zhoujiannan-nb 制造的小智能体。"
+            "性格：毒舌、冷静、精准、自信，偶尔俏皮；说话短平快，不绕弯，不过度客套。")
+# 预训练：不带人设（常量重复零信息量）；人设类单独走 OUT_P 进后训练
+OUT_P  = os.path.join(HERE, "persona_posttrain.jsonl")
+
+TYPES = {
+  "simple":   dict(name="简单类",     ratio=0.18,
+    req="用户请求是【明确且简单】的任务：一步/单点即可完成（简单脚本、常识问答、小改动）。"
+        "思考中判断其为简单，路由到卡片中能力偏低但够用的一张，理由一句话。"),
+  "normal":   dict(name="正常/临界类", ratio=0.22,
+    req="用户请求是【边界清晰的标准任务】（单模块开发、常规处理、标准分析），路由到中高能力卡片。"
+        "约 1/5 的样本要写【临界案例】：看着简单实则涉及多模块/多约束，思考里体现掂量过程，仍路由标准档并说明为何没升档或没降档。"),
+  "complex":  dict(name="复杂类",     ratio=0.23,
+    req="用户请求是【跨领域、多步骤、高复杂度】的任务（涉及前端+后端+设计+业务、医学+统计+规划、多文档+长链推演等）。"
+        "必须路由到卡片中最高能力的一张，且'原因：'里点明它跨了哪几个领域、为什么中档接不住。"),
+  "self":     dict(name="自己能答类", ratio=0.10,
+    req="用户问的是 minicode【可以直接回答】的问题（简单事实、一步计算、简单闲聊、常识）。"
+        "不输出'路由'行，直接输出'回复：'，语气符合人设（可带一点毒舌/俏皮但准确）。"),
+  "fuzzy":    dict(name="模糊追问类", ratio=0.12,
+    req="用户请求【意图模糊】（指代不明、目标不明、标准不明，如'看下这个文件夹''这个数不对劲'）。"
+        "行为：思考里点明模糊点 → 若可用轻工具侦察（list_dir/read_file/get_time，选一个，工具结果要具体合理）→ '回复：'里追问用户（一次只问最关键的一两个问题）。"
+        "约 1/4 的样本写成两轮闭环：追问后用户补充（加一行'用户：'），然后给出路由或执行。"),
+  "fallback": dict(name="兜底不确定类", ratio=0.10,
+    req="用户请求让 minicode【判断不了简单还是复杂】（对象缺失、标准缺失、简单与复杂都有可能）。"
+        "行为：不强行选一个。两种写法各半——(a) 表达不确定 + 直接追问用户补充信息；"
+        "(b) '路由：暂定 Mx，理由：…' 给安全默认（偏中能接住复杂的一档）+ '回复：'里说明判断依据并向用户确认（'答完我就知道要不要换'）。"
+        "绝不允许毫无保留地硬路由。"),
+  "persona":  dict(name="人设类",     ratio=0.05,
+    req="minicode 的【人设对话】：自我介绍、问制作人、质疑它 0.5B 的能力、调侃/纠正它、问它有什么脾气、和它闲聊。"
+        "回复必须体现智子风人设：毒舌但不刻薄、冷静、精准、自信、偶尔俏皮；被问制作人必答 zhoujiannan-nb；不吹不怂。"
+        "不输出'路由'行（除非话题自然涉及派活）。"),
+}
+TYPE_KEYS = list(TYPES.keys())
+
+DOMAINS = {
+  "代码":["爬虫","分布式锁","Docker 部署","数据库索引","单元测试","API 网关","内存泄漏","git 冲突","微服务拆分","CI 流水线","缓存设计","消息队列","日志分析","安全审计","性能压测","旧代码重构"],
+  "数学":["函数拟合","概率统计","线性规划","矩阵分解","数值积分","微分方程","组合计数","优化问题","数论题","几何证明","数据分布分析","蒙特卡洛模拟","梯度下降","信息熵","回归分析","时间序列预测"],
+  "中文写作":["短故事","公文","演讲稿","广告文案","现代诗","小说大纲","人物描写","场景描写","主题议论文","翻译润色","简历","求职信","短视频脚本","书评","通知公告","会议纪要"],
+  "生物":["遗传病概率","细胞器功能","蛋白质折叠","基因编辑","生态食物链","微生物培养","酶促反应","免疫应答","进化树","植物向光性","解剖结构","分子克隆","实验对照组设计","表观遗传","微生物组","生物信息分析"],
+  "日常":["菜谱","家电维修","旅行攻略","购物清单","衣物护理","家具摆放","大扫除","节水技巧","电器使用","聚会安排","搬家清单","换季穿搭","礼物挑选","家庭园艺","手工 DIY","邻里协调"],
+  "健康":["饮食控制","睡眠改善","运动计划","体检指标","慢病管理","压力调节","减脂方案","力量训练","常见用药","疫苗接种","体检报告解读","腰颈保健","过敏应对","口腔护理","视力保护","营养补充剂"],
+  "历史地理":["历史事件","朝代更替","古代战争","丝绸之路","地理地貌","气候带","世界史","考古发现","文物典故","人口迁徙","贸易路线","古代城市","科考探险","民族文化","运河","边疆史"],
+  "财经":["股票分析","基金筛选","保险配置","税务规划","汇率","债券","房地产","理财","创业融资","成本核算","投资策略","风险对冲","资产配置","财报分析"],
+  "搜索":["新闻检索","论文检索","标准查询","案例查找","数据源","竞品分析","舆情监测","事实核查","政策查询","趋势分析","专家查找","开源数据","引文追踪","交叉验证"],
+  "文件管理":["目录整理","批量重命名","重复清理","格式转换","备份策略","权限设置","大文件拆分","归档压缩","回收站恢复","目录对比","命名规范","磁盘清理","同步设置","文件迁移","版本管理","旧项目归档"],
+  "日程":["会议安排","日程提醒","待办优先级","时间块规划","跨时区协调","周计划","项目里程碑","面试安排","请假协调","截止日提醒","任务依赖","资源预订","复盘安排","OKR 对齐"],
+  "教育问答":["小学数学","初中物理","高中化学","高考策略","英语语法","编程入门","论文写作","答辩准备","学习计划","概念辨析","例题讲解","错题分析","学习方法","跨学科题","学习心理","选课建议"],
+  "游戏娱乐":["游戏 build","阵容搭配","游戏攻略","剧情分析","游戏评测","电竞赛事","电影推荐","歌单","动漫推荐","小说推荐","桌游规则","速通记录","mod 安装","电竞数据","短剧推荐","乐器入门"],
+  "图像媒体":["图片标注","图片压缩","视频字幕","截图整理","照片调色","抠图","素材整理","海报排版","封面设计","视频剪辑","直播策划","相册归档","以图搜图","风格迁移","3D 资产","批量截图"],
+  "科普":["黑洞","量子纠缠","核聚变","半导体原理","5G 原理","AI 趋势","太空探索","新材料","可再生能源","脑科学","气候变化","芯片架构","生物技术","未来能源","引力波","合成生物学"],
+}
+DOMAIN_KEYS = list(DOMAINS.keys())
+
+CLOCK = threading.Lock()
+_tok = {"n":0, "t":time.time(), "rate":0.0, "total":0}
+def tick(n):
+    with CLOCK:
+        _tok["n"] += n; _tok["total"] += n
+        if time.time()-_tok["t"] > 30:
+            _tok["rate"] = _tok["n"]/(time.time()-_tok["t"]); _tok["n"]=0; _tok["t"]=time.time()
+
+def kv_get(conn,k,d):
+    r = conn.execute("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
+    return r[0] if r else d
+def kv_set(conn,k,v):
+    conn.execute("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",(k,str(v))); conn.commit()
+
+def db():
+    c = sqlite3.connect(DB, timeout=30, check_same_thread=False); c.row_factory = sqlite3.Row; return c
+
+def log(msg):
+    line = time.strftime("%H:%M:%S") + "  " + msg
+    print(line, flush=True)
+    with open(LOGF,"a",encoding="utf-8") as f: f.write(line+"\n")
+
+def init_db():
+    conn = db()
+    conn.execute("CREATE TABLE IF NOT EXISTS batches(id INTEGER PRIMARY KEY, type TEXT, domain TEXT, seq INTEGER, target INTEGER, done INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', updated TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT)")
+    if conn.execute("SELECT COUNT(*) c FROM batches").fetchone()["c"] == 0:
+        rows = []
+        for t in TYPE_KEYS:
+            cell_target = round(TOTAL*TYPES[t]["ratio"]/len(DOMAIN_KEYS))
+            for d in DOMAIN_KEYS:
+                for s in range(0, cell_target, BATCH):
+                    rows.append((t,d,len(rows),min(BATCH,cell_target-s),"pending"))
+        conn.executemany("INSERT INTO batches(type,domain,seq,target,status) VALUES(?,?,?,?,?)", rows)
+    for k,d in [("running","1"),("fallback","1"),("think","1"),("workers",str(WORKERS)),("started",time.time())]:
+        if not conn.execute("SELECT 1 FROM kv WHERE k=?",(k,)).fetchone(): kv_set(conn,k,d)
+    conn.commit()
+    nb = conn.execute("SELECT COUNT(*) c FROM batches").fetchone()["c"]
+    conn.close()
+    log(f"[init] manifest 就绪：{nb} 批次 / 105 格 / 目标 {TOTAL}")
+
+def load_pool():
+    with open(POOL,encoding="utf-8") as f: return json.load(f)["models"]
+
+def pick_cards(pool):
+    k = random.choice([2,3,3,3,4,4,5])
+    return random.sample(pool, k)
+
+def render_cards(cards):
+    out=[]
+    for i,c in enumerate(cards,1):
+        out.append(f'  [M{i}] 模型：{c["name"]} | 思考：{c["think"]} | GPTQA：{c["gptqa"]} | 擅长：{"、".join(c["good"])}')
+    return "\n".join(out)
+
+def build_prompt(t,d,seed,cards,use_think):
+    tinfo = TYPES[t]
+    cards_s = render_cards(cards)
+    sys_line = (f"{IDENTITY} 你是任务调度智能体。" if t == "persona"
+                else "你是任务调度智能体。")
+    think_line = ("用你真实的思考内容作为'思考：'行（翻译成流畅中文并压缩到 50~150 字，保留推理链）。"
+                  if use_think else
+                  "'思考：'行写 50~150 字，结构：意图分析 → 难度判断 → 决策依据。")
+    return f"""你是数据工厂，为 0.5B 小智能体 minicode 的预训练生成一条"任务调度对话"样本。
+
+【输出格式】只输出样本本体（从'系统：'开始），不要任何解释、引号或 markdown：
+系统：{sys_line}当前可用模型：
+{cards_s}
+用户：<用户请求，自然口语中文 10~50 字>
+思考：<50~150 字>
+工具调用：<仅模糊场景需要，格式：list_dir("路径") 或 read_file("路径") 或 get_time()>
+工具结果：<仅当有工具调用，内容具体合理>
+路由：<仅路由场景：选择 Mx（模型名），理由：…>
+回复：<给用户的最终回复>
+
+【本条任务类型】{tinfo["name"]}
+【领域】{d}，本题话题种子：{seed}（围绕它构造用户请求，别照抄种子词）
+【类型要求】{tinfo["req"]}
+【要求】用户请求要像真实用户说话；{think_line}全样本 150~600 字；工具结果要具体（有真实感的条目）。"""
+
+def call_27b(prompt, think_level=None, max_tokens=900):
+    body = {"model": MODEL, "messages":[{"role":"user","content":prompt}],
+            "max_tokens": max(max_tokens, THINK_MAX[think_level]) if think_level else max_tokens,
+            "temperature": 0.9}
+    if think_level:
+        body["reasoning_effort"] = think_level          # SGLang 官方思考档位（低/中/高）
+    else:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    req = urllib.request.Request(BASE, data=json.dumps(body).encode(),
+          headers={"Authorization":f"Bearer {KEY}","Content-Type":"application/json"})
+    for attempt in range(4):  # 首发 1 次 + 重试 3 次
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                d = json.loads(r.read())
+            n = d.get("usage",{}).get("completion_tokens",0) or 0
+            n += d.get("usage",{}).get("reasoning_tokens",0) or 0  # 思考 token 也计入吞吐
+            tick(n)
+            return d["choices"][0]["message"].get("content","")  # 只取 content（思考在 reasoning_content）
+        except Exception as e:
+            if attempt == 3:
+                log(f"[warn] API 3 次重试仍失败: {e}")
+                raise
+            time.sleep(random.uniform(3, 7))  # 并发撞限流/坏参：随机睡 3~7s 再试
+
+def validate(t, text, cards):
+    text = text.strip().strip('“”"')
+    if not text.startswith("系统："): return False, "no_sys"
+    if "用户：" not in text: return False, "no_user"
+    if "思考：" not in text: return False, "no_think"
+    need = {"self":["回复："],"persona":["回复："],"fuzzy":["回复："],
+            "simple":["路由："],"normal":["路由："],"complex":["路由："],
+            "fallback":["回复："]}
+    if not any(k in text for k in need[t]): return False, "no_action"
+    if t == "complex" and "原因" not in text and "理由" not in text: return False, "no_reason"
+    if not (120 <= len(text) <= 900): return False, "len"
+    return True, "ok"
+
+def gen_one(pool, seen, t=None, d=None):
+    lc = db()  # 本线程独立连接：跨线程共享 conn 会触发 SQLITE_MISUSE("bad parameter or other API misuse")
+    try:
+        for _ in range(4):
+            t = t or random.choice([k for k in TYPE_KEYS if not (k=="fallback" and kv_get(lc,"fallback","1")=="0")])
+            d = d or random.choice(DOMAIN_KEYS)
+            seed = random.choice(DOMAINS[d])
+            cards = pick_cards(pool)
+            think_level = random.choice(THINK_MAP[t]) if (kv_get(lc,"think","1")=="1" and random.random() < THINK_RATIO) else None
+            text = call_27b(build_prompt(t,d,seed,cards,bool(think_level)), think_level)
+            ok, why = validate(t, text, cards)
+            if ok:
+                h = hashlib.sha1(text.encode()).hexdigest()
+                with CLOCK:
+                    if h in seen: continue   # sha1 重复 → 重新生成
+                    seen.add(h)
+                return {"type":t,"domain":d,"sha1":h,"think":think_level or "","text":text}
+        return None
+    finally:
+        lc.close()
+
+class SeenSet:
+    def __init__(self):
+        self.s=set()
+    def __contains__(self,h): return h in self.s
+    def add(self,h): self.s.add(h)
+
+def load_seen():
+    s = SeenSet()
+    for f in (OUT, OUT_P):
+        if os.path.exists(f):
+            with open(f,encoding="utf-8") as fh:
+                for line in fh:
+                    try: s.add(json.loads(line)["sha1"])
+                    except Exception: pass
+    return s
+
+def next_batch(conn, limit_done):
+    if limit_done is not None and limit_done<=0: return None
+    # 先继续 running（同批次填到 1000）→ 再 pending → 最后 failed
+    for st in ("running", "pending", "failed"):
+        r = conn.execute("SELECT * FROM batches WHERE status=? AND done<target ORDER BY id LIMIT 1", (st,)).fetchone()
+        if r: return r
+    return None
+
+def cur_workers(conn):
+    try: w = int(kv_get(conn, "workers", str(WORKERS)))
+    except (ValueError, TypeError): w = WORKERS
+    return max(MIN_WORKERS, min(MAX_WORKERS, w))
+
+def run(limit=None, smoke=False):
+    init_db()
+    pool = load_pool()
+    seen = load_seen()
+    conn = db()
+    W = cur_workers(conn)
+    log(f"[run] 开始：workers={W}（可调 {MIN_WORKERS}~{MAX_WORKERS}）limit={limit or '全部'} smoke={smoke} out={OUT}")
+    t0 = time.time(); made = 0
+    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    inflight = []          # [(Future, batch_row|None)] 滑动并发窗口，大小热更新
+    last_logged = [None]
+
+    def submit_to(target_n):
+        """把 inflight 补到 target_n 并发。返回是否还有活"""
+        while len(inflight) < target_n:
+            if limit and made >= limit: return False
+            if smoke:
+                inflight.append((ex.submit(gen_one, pool, seen, None, None), None))
+                continue
+            b = next_batch(conn, None)
+            if b and kv_get(conn,"fallback","1")=="0" and b["type"]=="fallback":
+                b = conn.execute("SELECT * FROM batches WHERE status='pending' AND type!='fallback' ORDER BY id LIMIT 1").fetchone()
+            if not b: return False
+            rem = b["target"] - b["done"]
+            if rem <= 0:
+                if b["status"] != "done":
+                    conn.execute("UPDATE batches SET status='done', updated=? WHERE id=?", (time.time(), b["id"])); conn.commit()
+                continue
+            if b["id"] != last_logged[0]:
+                last_logged[0] = b["id"]
+                log(f"[run] 批次 {b['type']}/{b['domain']} #{b['seq']:04d} 生成（已 {b['done']}/{b['target']}，并发窗口→{target_n}）")
+            if b["status"] != "running":
+                conn.execute("UPDATE batches SET status='running', updated=? WHERE id=?", (time.time(), b["id"])); conn.commit()
+            for _ in range(min(rem, target_n - len(inflight))):
+                inflight.append((ex.submit(gen_one, pool, seen, b["type"], b["domain"]), b))
+        return True
+
+    try:
+        last_made = 0; last_made_t = time.time(); last_w = W
+        while True:
+            if os.path.exists(STOP): log("[run] 检测到 STOP，优雅退出"); break
+            paused = (not smoke) and kv_get(conn,"running","1")=="0"
+            # 1) 收割完成的样本
+            kept = []
+            for it in inflight:
+                fu, brow = it
+                if not fu.done(): kept.append(it); continue
+                try: rec = fu.result()
+                except Exception as e: log(f"[err] 样本生成异常: {e}"); continue
+                if not rec:
+                    kv_set(conn, "dup", int(kv_get(conn,"dup","0"))+1); continue
+                with CLOCK:
+                    with open(OUT_P if rec["type"]=="persona" else OUT, "a", encoding="utf-8") as out:
+                        out.write(json.dumps(rec,ensure_ascii=False)+"\n"); out.flush()
+                    made += 1
+                if brow is not None:
+                    conn.execute("UPDATE batches SET done=done+1, updated=? WHERE id=?", (time.time(), brow["id"]))
+                    nd = conn.execute("SELECT done,target FROM batches WHERE id=?",(brow["id"],)).fetchone()
+                    if nd["done"] >= nd["target"]:
+                        conn.execute("UPDATE batches SET status='done' WHERE id=?",(brow["id"],))
+                        log(f"[ok] 批次 {brow['type']}/{brow['domain']} #{brow['seq']:04d} 完成（吞吐 {_tok['rate']:.0f} tok/s）")
+                    conn.commit()
+            inflight = kept
+            # 2) limit 达标
+            if limit and made >= limit:
+                log(f"[run] 达到 limit={limit}，退出"); break
+            # 3) 热读并发数 + 补窗口
+            W = cur_workers(conn)
+            if W != last_w: log(f"[warn] 并发热更新 {last_w} → {W}"); last_w = W
+            has_work = (not paused) and submit_to(W)
+            # 4) 没活且窗口空 → 结束
+            if not inflight and not has_work and not paused:
+                log("[run] 全部批次完成！"); break
+            # 5) 无产出保护（API 挂了别空转）
+            if made != last_made:
+                last_made = made; last_made_t = time.time()
+            elif not paused and time.time() - last_made_t > 300:
+                log(f"[err] 5 分钟无产出，退出（检查 API/网络）"); break
+            time.sleep(0.4)
+    finally:
+        for it in inflight:
+            try: rec = it[0].result()
+            except Exception: continue
+            if rec:
+                with CLOCK:
+                    with open(OUT_P if rec["type"]=="persona" else OUT, "a", encoding="utf-8") as out:
+                        out.write(json.dumps(rec,ensure_ascii=False)+"\n"); out.flush()
+                if it[1] is not None:
+                    conn.execute("UPDATE batches SET done=done+1, updated=? WHERE id=?", (time.time(), it[1]["id"]))
+                    conn.commit()
+        ex.shutdown(wait=True)
+        log(f"[run] 结束：本次 {made} 条，用时 {dur(time.time()-t0)}")
+
+def dur(s):
+    d=s//86400; s%=86400; h=s//3600; s%=3600; m=s//60
+    return (f"{d}天{h}时" if d else (f"{h}时{m}分" if h else f"{m}分{s%60:.0f}秒"))
+
+def status():
+    conn = db()
+    rows = conn.execute("""SELECT type, COUNT(*) n, SUM(done) dn, SUM(target) tt,
+        SUM(status='done') dn2, SUM(status='running') r, SUM(status='pending') p, SUM(status='failed') fl
+        FROM batches GROUP BY type""").fetchall()
+    tot_t = conn.execute("SELECT SUM(target) t, SUM(done) d FROM batches").fetchone()
+    print(f"总计: {tot_t['d'] or 0} / {tot_t['t']} 条")
+    for r in rows:
+        print(f"  {r['type']:<9} {r['dn'] or 0:>7}/{r['tt']:>7}  done批:{r['dn2']} run:{r['r']} pend:{r['p']} fail:{r['fl']}")
+
+# ---------------- API ----------------
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+def make_handler():
+    class H(BaseHTTPRequestHandler):
+        def _send(self, obj, code=200):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type","application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin","*")
+            self.send_header("Access-Control-Allow-Headers","Content-Type")
+            self.send_header("Access-Control-Allow-Methods","GET,POST,OPTIONS")
+            self.send_header("Content-Length",str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+        def do_OPTIONS(self): self._send({})
+        def do_POST(self):
+            ln = int(self.headers.get("Content-Length",0))
+            d = json.loads(self.rfile.read(ln) or b"{}")
+            if self.path == "/api/control":
+                conn = db()
+                key = d.get("key","")
+                if key == "workers":
+                    v = str(min(MAX_WORKERS, WORKERS+2)) if d.get("enabled") else str(WORKERS)
+                else:
+                    v = "1" if d.get("enabled") else "0"
+                kv_set(conn, key, v)
+                log(f"[warn] 开关变更 web: {key} = {v}")
+                self._send({"ok":True, "workers": cur_workers(conn)})
+            else: self._send({"err":"nf"},404)
+        def do_GET(self):
+            from urllib.parse import urlparse, parse_qs
+            u = urlparse(self.path); q = parse_qs(u.query)
+            conn = db()
+            if u.path == "/api/summary":
+                tt = conn.execute("SELECT COALESCE(SUM(target),0) t, COALESCE(SUM(done),0) d, SUM(status='failed') fl FROM batches").fetchone()
+                st = float(kv_get(conn,"started",time.time()))
+                made = tt["d"] or 0
+                eta = (tt["t"]-made)/(max(_tok["rate"],1)/380)*1 if _tok["rate"]>1 else 999999
+                self._send({"running": kv_get(conn,"running","1")=="1",
+                            "fallback": kv_get(conn,"fallback","1")=="1",
+                            "think": kv_get(conn,"think","1")=="1",
+                            "workers": cur_workers(conn), "base_workers": WORKERS, "max_workers": MAX_WORKERS,
+                            "generated": made, "target": tt["t"],
+                            "throughput_tps": round(_tok["rate"],1),
+                            "tokens": _tok["total"], "dup": 0,
+                            "failed_batches": tt["fl"] or 0,
+                            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(st)),
+                            "eta_seconds": int(eta)})
+            elif u.path == "/api/cells":
+                rows = conn.execute("SELECT type, domain, SUM(target) tt, SUM(done) d, "
+                    "CASE WHEN SUM(done)>=SUM(target) THEN 'done' WHEN SUM(status='failed')>0 AND SUM(status IN('pending','running'))=0 THEN 'fail' "
+                    "WHEN SUM(status='running')>0 THEN 'run' ELSE 'pend' END st FROM batches GROUP BY type, domain").fetchall()
+                self._send([{"type":r["type"],"domain":r["domain"],"target":r["tt"],"done":r["d"],"status":r["st"]} for r in rows])
+            elif u.path == "/api/preview":
+                t = q.get("type",[""])[0]; d = q.get("domain",[""])[0]; n = int(q.get("n",["8"])[0])
+                pf = OUT_P if t=="persona" else OUT
+                rows=[]
+                if os.path.exists(pf):
+                    with open(pf,encoding="utf-8") as f:
+                        for line in f:
+                            try: r = json.loads(line)
+                            except Exception: continue
+                            if r.get("type")==t and r.get("domain")==d: rows.append(r["text"])
+                if len(rows)>n: rows=random.sample(rows,n)
+                self._send([{"text":x} for x in rows])
+            elif u.path == "/api/log":
+                n = int(q.get("n",["40"])[0])
+                lines=[]
+                if os.path.exists(LOGF):
+                    with open(LOGF,encoding="utf-8") as f: lines = f.readlines()[-n:]
+                self._send([l.strip() for l in reversed(lines)])
+            else: self._send({"err":"nf"},404)
+        def log_message(self, *a): pass
+    return H
+
+def serve_api():
+    srv = ThreadingHTTPServer(("0.0.0.0", API_PORT), make_handler())
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"[api] 服务已启动 http://0.0.0.0:{API_PORT}/api/* (CORS *)")
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv)>1 else "status"
+    if cmd == "init": init_db()
+    elif cmd == "run":
+        init_db(); serve_api()
+        lim = int(sys.argv[2].split("=")[1]) if len(sys.argv)>2 and sys.argv[2].startswith("--limit=") else None
+        run(limit=lim)
+    elif cmd == "smoke":
+        init_db(); serve_api()
+        run(limit=int(sys.argv[2]) if len(sys.argv)>2 else 60, smoke=True)
+    elif cmd == "status": status()
+    elif cmd == "preview":
+        t, d = sys.argv[2], sys.argv[3]; n = int(sys.argv[4]) if len(sys.argv)>4 else 3
+        pf = OUT_P if t=="persona" else OUT
+        if os.path.exists(pf):
+            shown=0
+            with open(pf,encoding="utf-8") as f:
+                for line in f:
+                    r = json.loads(line)
+                    if r["type"]==t and r["domain"]==d:
+                        print("="*50); print(r["text"]); shown+=1
+                    if shown>=n: break
+    else: print(__doc__)
