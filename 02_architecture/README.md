@@ -12,7 +12,7 @@
 | 层 | 内容 | 产出 | 状态 |
 |---|---|---|---|
 | L0 | 约束确认：为什么 0.5B、它翻译过来是什么 | `design/L0_constraints.md` | 🔵 进行中 |
-| L1 | 骨架选择：注意力 / 位置编码 / 归一化 / FFN / embedding 是否共享 | `design/L1_skeleton.md` | ⬜ |
+| L1 | 骨架选择：注意力 / 位置编码 / 归一化 / FFN / embedding 是否共享 | `design/L1_skeleton.md` | 🔵 进行中（1/6：注意力=GQA，待确认） |
 | L2 | 容量分配：500M 怎么分给 hidden / 层数 / 头数 / 中间维度 | `design/L2_capacity.md` | ⬜ |
 | L3 | 落地验证：config → 实例化 → 参数审计 → forward | `design/config_*.json` + `experiments/` | ⬜ |
 
