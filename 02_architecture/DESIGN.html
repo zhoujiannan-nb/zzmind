@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zzmind-0.5B 架构设计 v1.0（讲解版）</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#1f2430; --sub:#5b6472;
+    --line:#e3e7f0; --accent:#2f6fed; --accent2:#0e9f6e; --warn:#c2410c;
+    --code:#0f172a; --code-ink:#e2e8f0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink);line-height:1.65}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  /* header */
+  header{background:linear-gradient(135deg,#1e2a4a,#2f6fed 60%,#0e9f6e);color:#fff;padding:28px 24px 22px}
+  header h1{margin:0 0 6px;font-size:26px}
+  header p{margin:0;opacity:.92;font-size:14px}
+  .chips{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.35);padding:3px 10px;border-radius:999px;font-size:12.5px}
+  /* layout */
+  .wrap{display:flex;gap:20px;max-width:1180px;margin:18px auto;padding:0 16px}
+  nav.toc{flex:0 0 224px;position:sticky;top:12px;height:fit-content;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:13px}
+  nav.toc b{display:block;margin-bottom:8px;color:var(--sub)}
+  nav.toc ol{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px}
+  main{flex:1;min-width:0}
+  section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin-bottom:16px}
+  section h2{margin:2px 0 12px;font-size:19px;border-bottom:2px solid var(--accent);padding-bottom:6px}
+  section h2 .no{color:var(--accent);font-family:Consolas,monospace}
+  section h3{margin:18px 0 8px;font-size:15.5px;color:#16213e}
+  p,li{font-size:14px}
+  .sub{color:var(--sub);font-size:13px}
+  table{border-collapse:collapse;width:100%;font-size:13.2px;margin:10px 0}
+  th,td{border:1px solid var(--line);padding:6px 9px;text-align:left}
+  th{background:#eef2fb}
+  tr.ok td:first-child{font-weight:600}
+  .tag{display:inline-block;background:#e6f4ee;color:var(--accent2);border-radius:6px;padding:0 7px;font-size:12px;font-weight:600;margin-left:6px}
+  code,pre{font-family:Consolas,Menlo,monospace}
+  pre{background:var(--code);color:var(--code-ink);padding:14px 16px;border-radius:10px;overflow:auto;font-size:12.8px;line-height:1.5}
+  details{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:10px 0}
+  summary{cursor:pointer;font-weight:600;font-size:14px;color:#16213e}
+  .why{margin:6px 0 0;font-size:13.5px}
+  .bar{display:flex;height:26px;border-radius:8px;overflow:hidden;font-size:11.5px;color:#fff;margin:8px 0 2px}
+  .bar div{display:flex;align-items:center;justify-content:center}
+  .bar .b-embed{background:#64748b}
+  .bar .b-ffn{background:var(--accent2)}
+  .bar .b-attn{background:var(--accent)}
+  .footnote{font-size:12px;color:var(--sub);margin-top:4px}
+  footer{color:var(--sub);font-size:12.5px;text-align:center;padding:10px 0 30px}
+  @media (max-width:900px){.wrap{flex-direction:column}nav.toc{position:static;width:auto}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>zzmind-0.5B 架构设计 · 讲解版</h1>
+  <p>从"0.5B、2×4090"一路推理到整份配置 —— 为什么每个数字是它、不是别的。定稿 v1.0（2026-09-28）</p>
+  <div class="chips">
+    <span class="chip">497.8M 参数</span>
+    <span class="chip">1280 × 24 层</span>
+    <span class="chip">GQA 16Q/8KV</span>
+    <span class="chip">RoPE base 1e6 · 32k</span>
+    <span class="chip">SwiGLU · tie</span>
+    <span class="chip">E1/E2/E3 已验证</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<nav class="toc">
+  <b>目录</b>
+  <ol>
+    <li><a href="#s0">一屏看懂</a></li>
+    <li><a href="#s1">任务定位</a></li>
+    <li><a href="#s2">硬约束 C1~C4</a></li>
+    <li><a href="#s3">组件决策</a></li>
+    <li><a href="#s4">容量分配</a></li>
+    <li><a href="#s5">结构全景</a></li>
+    <li><a href="#s6">参数审计</a></li>
+    <li><a href="#s7">关键账</a></li>
+    <li><a href="#s8">验证与风险</a></li>
+    <li><a href="#s9">定稿配置</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="s0">
+  <h2><span class="no">0.</span> 一屏看懂</h2>
+  <table>
+    <tr><th>项</th><th>值</th></tr>
+    <tr><td>规模</td><td><b>497.8M 参数</b>（0.5B 预算的 99.56%，C1 容差 450~550M ✅）</td></tr>
+    <tr><td>架构</td><td>24 层 decoder-only Transformer（Qwen3 / minimind 风格）</td></tr>
+    <tr><td>配置</td><td>hidden=1280 ｜ layers=24 ｜ Q/KV 头 = 16/8（head_dim 80）｜ FFN=4032 ｜ 词表=6400 ｜ 上下文=32k</td></tr>
+    <tr><td>关键取舍</td><td>GQA 省推理内存 ｜ RoPE 白拿长上下文 ｜ RMSNorm pre-norm 深堆稳定 ｜ tie 省 8.2M</td></tr>
+    <tr><td>验证</td><td>E1 前向 loss≈ln6400 ✅ ｜ E2 参数审计 497.8M（偏差 0.000%）✅ ｜ E3 最小 decoder 从 0 学会 ✅</td></tr>
+  </table>
+</section>
+
+<section id="s1">
+  <h2><span class="no">1.</span> 任务定位（架构为什么长这样）</h2>
+  <p>minicode = 0.5B 小智能体，要会四件事：</p>
+  <ol>
+    <li><b>人格陪伴</b>：风格稳定的对话（毒舌/冷静/精准/自信/偶尔俏皮）</li>
+    <li><b>2~4 个工具调用</b>：get_time / calculator / get_weather / search_web…（严格 JSON 格式输出）</li>
+    <li><b>轻量推理</b>：think token 短思维链（QwQ 思路）</li>
+    <li><b>多意图路由</b>：把用户请求路由到合适能力档（data/ 阶段 68 万条语料）</li>
+  </ol>
+  <p>→ 对架构的四个要求：<b>格式记忆厚</b>（FFN 拿大头）、<b>长程交互带宽足</b>（注意力配比健康）、<b>多步链深度够</b>（层数够深）、<b>推理省内存</b>（GQA + RoPE 32k）。</p>
+
+  <details>
+    <summary>为什么是 0.5B（候选排除）</summary>
+    <p class="why">判断锚点 = <b>迭代成本</b>（我们要反复换人格/工具重训），不是"越大越好"。</p>
+    <table>
+      <tr><th>规模</th><th>2×4090 训 1.5B token（粗估）</th><th>换一版人格重训</th><th>结论</th></tr>
+      <tr><td>~100M</td><td>3~6 h</td><td>一天数版</td><td>太小：工具格式勉强、性格扁平</td></tr>
+      <tr class="ok"><td><b>~500M</b></td><td><b>15~28 h</b></td><td><b>一周一两版，可行</b></td><td>✅ 甜点</td></tr>
+      <tr><td>~7B</td><td>数周起、且严重欠训练</td><td>按月上计</td><td>迭代太慢，杀"性格实验自由"</td></tr>
+    </table>
+  </details>
+</section>
+
+<section id="s2">
+  <h2><span class="no">2.</span> 硬约束（设计宪法 C1~C4）</h2>
+  <table>
+    <tr><th>#</th><th>约束</th><th>值</th><th>来源</th><th>会约束住什么</th></tr>
+    <tr><td>C1</td><td>参数预算</td><td><b>450~550M</b></td><td>项目目标</td><td>所有维度的"总盘子"</td></tr>
+    <tr><td>C2</td><td>训练硬件</td><td>2× RTX 4090（24G×2）bf16 DDP</td><td>00 侦察</td><td>深/宽上限 + 显存账</td></tr>
+    <tr><td>C3</td><td>词表</td><td><b>6400（锁死）</b></td><td>01 的 BPE 已编码语料</td><td>embedding = 6400×hidden；改词表 = 01 白学</td></tr>
+    <tr><td>C4</td><td>上下文</td><td><b>32768</b></td><td>Qwen3 风格</td><td>长上下文用 RoPE，零参数成本</td></tr>
+  </table>
+  <p class="sub">规矩：任何设计决定违反 C1~C4 即无效。</p>
+</section>
+
+<section id="s3">
+  <h2><span class="no">3.</span> 组件决策（六个"为什么"）</h2>
+
+  <details open>
+    <summary>3.1 注意力 → GQA（16 Q / 8 K + 8 V）<span class="tag">省推理内存</span></summary>
+    <p class="why">三变体（MHA/GQA/MQA）<b>唯一区别在 KV 头数</b>（Q 头固定 16）。为什么只动 KV：</p>
+    <ul class="why">
+      <li><b>Q 是"一次性"的</b>：decode 每步只算当前 token 的 Q，历史 Q 不存</li>
+      <li><b>K/V 是"累积"的</b>：历史每个 token 的 K/V 必须缓存（KV cache，随 seq 线性增长）</li>
+    </ul>
+    <p class="why">KV cache（bf16，32k 上下文，24 层）= 2×24层×KV头×80×2B×seq：</p>
+    <table>
+      <tr><th></th><th>每 token</th><th>32k 单条</th><th>×8 并发</th></tr>
+      <tr><td>MHA (16)</td><td>120 KB</td><td>3.75 G</td><td>30 G ← 24G 卡装不下</td></tr>
+      <tr class="ok"><td><b>GQA (8)</b></td><td>60 KB</td><td><b>1.88 G</b></td><td>15 G ✅</td></tr>
+      <tr><td>MQA (1)</td><td>7.5 KB</td><td>234 M</td><td>1.9 G</td></tr>
+    </table>
+    <ul class="why">
+      <li>decode 是<b>带宽瓶颈</b>（每步读整个 KV cache）→ cache 减半 = 生成提速</li>
+      <li><b>训练侧几乎无感</b>：attention 计算量由 16 个 Q 头决定；K/V 投影权重 MHA 78.6M vs GQA 39.3M（省 39M 投回别处）</li>
+      <li><b>质量</b>：MHA ≥ GQA &gt; MQA；GQA(g=8) 基本追回 MHA（Ainslie 2023），LLaMA2/3、Qwen 全系 GQA</li>
+      <li>⚠️ 术语坑：是 <b>8 个 K + 8 个 V</b>（K=索引、V=内容，必须成对），不是"8 个 V"</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>3.2 位置编码 → RoPE（base 1e6）<span class="tag">零参数白拿 32k</span></summary>
+    <ul class="why">
+      <li><b>为什么必须</b>：纯 attention 打分置换不变（打乱词序，输出只是同样打乱）——不注入位置就学不到词序</li>
+      <li><b>做法</b>：每个 Q/K 头 80 维拆成 40 对二维平面，第 i 对转 <code>pos×θᵢ</code>，θᵢ=base^(-2i/80)</li>
+      <li><b>为什么是"相对"</b>：旋转矩阵正交 → <code>⟨R_m·q, R_n·k⟩ = ⟨q, R_{n−m}·k⟩</code>，绝对位置全抵消，只剩差 n−m（"看两根钟针的夹角"）</li>
+      <li><b>三个推论</b>：零参数 ｜ 32k 稳（最慢档周期 ~440 万）｜ Q、K 必须一起转，V 不转</li>
+      <li>落选：绝对位置 embedding（训练长度是上限）、ALiBi（固定惩罚不可学）</li>
+      <li>base 用 <b>1e6</b>（对齐 minimind 源码）而非 1e4（最慢档周期仅 ~5 万，32k 偏紧）</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>3.3 归一化 → RMSNorm（pre-norm）<span class="tag">深堆 24 层不炸</span></summary>
+    <ul class="why">
+      <li><b>RMSNorm</b> = 除以自身均方根（音量旋钮）+ 可学习逐维缩放（均衡器），只有 weight 无 bias</li>
+      <li>vs <b>LayerNorm</b>：LN 两步（①减均值 ②除标准差）+bias；RMSNorm 只干②——"少的一步"= 不减均值，质量无损（Zhang &amp; Sennrich 2019）</li>
+      <li><b>pre-norm</b>（<code>x = x + Attention(RMSNorm(x))</code>）：残差高速公路保持<b>干净恒等</b>，梯度走 ∂x/∂x=1 直通；
+        post-norm 把 norm 压在残差上，梯度要穿 24 次 norm → 难训（原始 Transformer 需重 warmup 的教训）</li>
+      <li>顶部 final RMSNorm 是唯一"尾部归一"，只在出最后一层时做一次</li>
+      <li>全模型 97 个 RMSNorm ≈ 66.5K 参数</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>3.4 FFN → SwiGLU（silu 门控，3 张矩阵）<span class="tag">知识库</span></summary>
+    <pre>GELU 旧路线：down( gelu( up(x) ) )            2 矩阵，每条中间神经元"全开"
+SwiGLU 现役：down( silu( gate(x) ) · up(x) )  3 矩阵，gate 决定每条"开多大"</pre>
+    <ul class="why">
+      <li>门控 = attention 软门的 FFN 版（逐元素闸门）；同等预算下质量更好（Shazeer 2020），LLaMA/Qwen 全系标配</li>
+      <li>代价：多一张矩阵。FFN 汇集了 <b>74.6% 的参数量</b>当"知识库"，attention 只当"混音器"</li>
+      <li>I=4032 的来历：<code>I = ceil(H·π/64)·64 = ceil(1280×3.1416/64)×64 = 63×64</code>，π 是配比系数</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>3.5 三个开关（共享 &amp; 训练技巧）</summary>
+    <table>
+      <tr><th>开关</th><th>值</th><th>为什么</th></tr>
+      <tr><td>tie_word_embeddings</td><td><b>true</b></td><td>embed 与 lm_head 是<b>同一张 tensor</b>：省 8.19M + 输出与输入同空间天然正则</td></tr>
+      <tr><td>dropout</td><td><b>0.0</b></td><td>0.5B 本来就欠训练，dropout 只拖慢收敛；正则留给 04/05</td></tr>
+      <tr><td>bias / flash_attn</td><td><b>False / True</b></td><td>现代标配去 bias；torch SDPA 提速</td></tr>
+    </table>
+  </details>
+
+  <details>
+    <summary>3.6 附加：QK-Norm</summary>
+    <p class="why"><code>q_norm / k_norm</code> = RMSNorm(head_dim=80)，在 <b>RoPE 之前</b>作用在 Q/K 上（minimind 源码坐实），每层仅 160 参数。</p>
+  </details>
+</section>
+
+<section id="s4">
+  <h2><span class="no">4.</span> 容量分配（为什么是 1280×24×4032）</h2>
+  <p><b>参数公式</b>（r = Q头/KV头 = 2）：每层 attention <code>A = 3H²</code>；每层 FFN <code>F = 3HI</code>；embedding <code>E = V·H</code>。</p>
+  <p><b>配比</b>：attn:ffn = F/A = I/H = 4032/1280 ≈ <b>1:3.15</b>——"attention 混音、FFN 知识"的钱怎么分，LLaMA/Qwen 祖传比例（π 的出处）。</p>
+  <table>
+    <tr><th>方案</th><th>H×L×I</th><th>attn:ffn</th><th>总量</th><th>裁决</th></tr>
+    <tr><td>A 宽而浅</td><td>1536×18×4416</td><td>1:2.9</td><td>~504M</td><td>attention 的 H² 吸走预算，深度只剩 18 步 ❌</td></tr>
+    <tr class="ok"><td><b>B 均衡 ✅</b></td><td><b>1280×24×4032</b></td><td><b>1:3.15</b></td><td><b>497.8M</b></td><td>深度足 + 配比健康，0.5B 档最常用</td></tr>
+    <tr><td>C 深而窄</td><td>1024×32×4032</td><td>1:3.9</td><td>~504M</td><td>32 步但注意力仅 1:3.9，交互瓶颈 ❌</td></tr>
+  </table>
+  <ul>
+    <li><b>层数为何 24</b>：20 层=400M 亏预算；26 层=538M 贴上限；24 层=489.6M+8.2M≈497.8M，且 Qwen2.5/3-0.5B 同为 24 层</li>
+    <li><b>防线</b>：H≥1536 知识库被 H² 挤牙膏；H≤768 每层 attention 仅 1.8M 带宽不足；头 32 则 head_dim=40 太细</li>
+  </ul>
+</section>
+
+<section id="s5">
+  <h2><span class="no">5.</span> 结构全景（零件与顺序）</h2>
+  <pre>input_ids [B,S]（token 编号）
+  │
+  ▼
+① Embedding：查表 6400×1280 → [B,S,1280]        ← 数据流第一站（与 ④ 共享权重）
+  │
+  ▼
+② 24 × Block：
+  │  x = x + Attention(RMSNorm(x))               ← attn 子层（在前）
+  │       └ q/k/v_proj → q/k_norm(QK-Norm) → RoPE → SDPA → o_proj
+  │  x = x + MLP(RMSNorm(x))                     ← MLP 子层（在后）
+  │       └ silu(gate(x))·up(x) → down(x)（SwiGLU）
+  │
+  ▼
+③ final RMSNorm
+  │
+  ▼
+④ lm_head：1280→6400（与 ① 同一张权重）→ logits [B,S,6400]</pre>
+  <p class="sub">术语：<b>"层"（num_hidden_layers=24）= 一个 Block</b>（attn 子层 + mlp 子层）；attn 在前、mlp 在后 = 原始 Transformer 顺序；pre-norm 保证残差"干净恒等"。</p>
+</section>
+
+<section id="s6">
+  <h2><span class="no">6.</span> 参数量审计（E2 实测 = 手工账）</h2>
+  <div class="bar">
+    <div class="b-ffn" style="width:74.6%" title="FFN 371.6M">FFN 74.6%</div>
+    <div class="b-attn" style="width:23.7%" title="Attention 118.0M">Attn 23.7%</div>
+    <div class="b-embed" style="width:1.6%" title="Embedding 8.2M">Emb 1.6%</div>
+  </div>
+  <table>
+    <tr><th>组件</th><th>参数</th><th>占比</th></tr>
+    <tr><td>Embedding（与 lm_head 共享，只算一次）</td><td>8,192,000</td><td>1.6%</td></tr>
+    <tr><td>24 × Attn（q/k/v/o_proj + q_k_norm）</td><td>117,968,640</td><td>23.7%</td></tr>
+    <tr><td>24 × FFN（gate/up/down）</td><td>371,589,120</td><td>74.6%</td></tr>
+    <tr><td>RMSNorm（块内 48 + final 1 + qk 48）</td><td>66,560</td><td>0.0%</td></tr>
+    <tr><td><b>总计</b></td><td><b>497,812,480 ≈ 497.8M</b></td><td>100%</td></tr>
+  </table>
+  <p class="sub">单块：attn 4.92M + ffn 15.48M + 2×norm 2,560 = 20.4M。E2 用 named_parameters()（tied 去重；用 state_dict 会把共享权重数两遍）实测偏差 <b>0.000%</b>，相对 500M 预算 99.56% ✅。</p>
+</section>
+
+<section id="s7">
+  <h2><span class="no">7.</span> 关键账</h2>
+  <table>
+    <tr><th>项</th><th>数</th><th>备注</th></tr>
+    <tr><td>训练计算量</td><td>6·N·T ≈ <b>4.5e18 FLOPs</b></td><td>T=1.5B token（首版）</td></tr>
+    <tr><td>训练时长</td><td><b>15~28 h</b></td><td>2×4090 bf16 DDP</td></tr>
+    <tr><td>训练显存</td><td>权重系 ~8G/卡 + 激活</td><td>24G×2 宽裕</td></tr>
+    <tr><td>推理 KV cache</td><td><b>1.88G/条 @32k</b></td><td>GQA-8（MHA 将 3.75G）</td></tr>
+    <tr><td>参数 / 预算</td><td>99.56%</td><td>C1 通过</td></tr>
+  </table>
+</section>
+
+<section id="s8">
+  <h2><span class="no">8.</span> 验证与风险</h2>
+  <table>
+    <tr><th>实验</th><th>结果</th></tr>
+    <tr><td>E1 前向走查</td><td>shape (2,32)→(2,32,6400) 正确；初始 loss <b>9.06</b> ≈ ln(6400)=8.76（±0.3 为随机初始化 logits 非全零的正常波动）；backward 无 NaN</td></tr>
+    <tr><td>E2 参数审计</td><td>497,812,480，手工账 vs 实例化偏差 <b>0.000%</b></td></tr>
+    <tr><td>E3 最小 decoder</td><td>110,912 参数纯 torch 从 0 学"后继规则"，loss 4.72 → <b>0.026</b></td></tr>
+  </table>
+  <p><b>已知欠训练</b>：497.8M 配 1.5B token ≈ 3× Chinchilla 最优（~150M）。<b>有意为之</b>：先"会说话 + 按格式"，跑通后可选吃满 4~5B token 补训，<b>不动架构</b>。SFT/RL 显存吃紧 → seq 降 1024 / gradient checkpointing，<b>不动架构</b>。</p>
+</section>
+
+<section id="s9">
+  <h2><span class="no">9.</span> 定稿配置（生成 / 训练直接可用）</h2>
+  <pre>{
+  "_model": "zzmind-0.5B",
+  "_version": "v1.0-final (2026-09-28 定稿)",
+  "_task": "minicode：人格陪伴 + 2~4 工具调用 + 轻量推理 + 多意图路由",
+  "model_type": "minimind",
+  "hidden_size": 1280,
+  "num_hidden_layers": 24,
+  "num_attention_heads": 16,
+  "num_key_value_heads": 8,
+  "head_dim": 80,
+  "intermediate_size": 4032,
+  "vocab_size": 6400,
+  "max_position_embeddings": 32768,
+  "tie_word_embeddings": true,
+  "rope_theta": 1000000.0,
+  "rms_norm_eps": 1e-6,
+  "hidden_act": "silu",
+  "use_moe": false,
+  "num_experts": 4,
+  "num_experts_per_tok": 1,
+  "dropout": 0.0,
+  "flash_attn": true
+}</pre>
+</section>
+
+</main>
+</div>
+
+<footer>zzmind · 02 模型架构 · 定稿 v1.0（2026-09-28）—— 对应 Markdown 版：DESIGN.md；旧工作坊版与实验脚本保存在 git 历史中</footer>
+
+</body>
+</html>
