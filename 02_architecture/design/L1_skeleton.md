@@ -83,7 +83,40 @@ q 在位置 m 旋转、k 在位置 n 旋转 → 点积里绝对角全部抵消�
 ### 决定
 RoPE，base = **1e6**（对齐 minimind 源码 `precompute_freqs_cis(rope_base=1e6)` / Qwen3；
 不用 1e4：1e4 最慢频率周期仅 ~5 万，对 32k 偏紧），max_pos = 32768。
-## 3. 归一化 ⬜（RMSNorm pre-norm vs LayerNorm）
+## 3. 归一化 → ✅ RMSNorm（pre-norm），"为什么 pre" 待讲
+
+### 3.1 RMSNorm 地基
+**名字**：RMS = Root Mean Square（均方根），Norm = 归一化。
+**一句话**：把每个 token 的 1280 维向量除以它自己的均方根（音量拉回标准刻度），再乘可学习的逐维缩放。
+
+minimind 代码逐行拆解：
+```python
+def norm(self, x):        # x: [B, S, 1280]
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+def forward(self, x):
+    return (self.weight * self.norm(x.float())).type_as(x)
+```
+| 步骤 | 含义 |
+|---|---|
+| `x.pow(2).mean(-1)` | 1280 个数平方取平均 = "均方"（≈向量能量） |
+| `rsqrt(· + eps)` | 开方取倒数 = 除以 RMS；eps 防除零 |
+| `x * ...` | 操作后向量 RMS ≈ 1（音量统一） |
+| `self.weight *` | 1280 个可学习缩放（初始 1）= "均衡器" |
+| `.float()`/`.type_as` | fp32 计算防精度丢失，转回 bf16 |
+
+**LayerNorm vs RMSNorm**：LN 干两步（①减均值 ②除标准差）+bias；
+RMSNorm 只干②，**少的就是"减均值"**，bias 也没了。
+论文（Zhang & Sennrich 2019）实测不减均值质量基本无损 → 留快的。
+
+**为什么必须有**：每层是大矩阵乘，输出"音量"随初始化/数据漂移；
+24 层堆叠后有的层输入炸响（梯度爆）、有的轻到消失（梯度没）。
+RMSNorm = 每个子层入口的"音量旋钮"，weight = 均衡器。
+
+**参数**：只有 weight 无 bias（所以参数表里 norm 只算 1280/80）。
+全模型 97 个（块内 24×2 + final 1 + q/k_norm 24×2）≈ 66.5K 参数。
+
+### 3.2 为什么 pre-norm（待讲）
+`x = x + Attention(RMSNorm(x))`：这个结构堆 24 层为什么稳、post-norm 为什么难训。
 ## 4. FFN 激活 ⬜（SwiGLU vs GELU）
 ## 5. embedding 与 lm_head 是否共享（tie）⬜
 ## 6. 训练技巧（dropout 等，0.5B 下基本全关）⬜

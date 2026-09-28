@@ -19,6 +19,8 @@
   Block 内 attn 在前、mlp 在后（原始 Transformer 顺序）。详见 L1 §7 全景图
 - [发现] QK-Norm 的位置：q_norm/k_norm = RMSNorm(80)，在 RoPE 之前作用在 Q/K 上
 - [粗算] 一个 Block ≈ 20.4M → 总计 497.8M，落在 C1 预算内（"为什么是这些数"留 L2）
+- [理解] RMSNorm = 向量除以自身均方根（音量旋钮）+ 可学习均衡器；
+  比 LayerNorm 少"减均值"一步、无 bias；全模型 97 个、~66.5K 参数。详见 L1 §3.1
 
 ## 待办
 - [ ] L1 剩余 5 组件：位置编码 / 归一化 / FFN 激活 / tie / 训练技巧
