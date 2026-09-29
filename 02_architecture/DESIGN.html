@@ -79,6 +79,7 @@
     <li><a href="#s4">容量分配</a></li>
     <li><a href="#s5">结构全景</a></li>
     <li><a href="#s5b">5B 矩阵结构图</a></li>
+    <li><a href="#s5c">5C 数据流演示</a></li>
     <li><a href="#s6">参数审计</a></li>
     <li><a href="#s7">关键账</a></li>
     <li><a href="#s8">验证与风险</a></li>
@@ -252,6 +253,7 @@ SwiGLU 现役：down( silu( gate(x) ) · up(x) )  3 矩阵，gate 决定每条"�
 <section id="s5b">
   <h2><span class="no">5B.</span> 参数矩阵结构示意图</h2>
   <p class="sub">基于 §9 定稿配置。自上而下 = 数据流；条宽 ∝ 该矩阵的最大维度（词表 6400 为全宽）；颜色 = 组件类别；框内/旁标注 = 矩阵 shape 与参数量。</p>
+  <p class="sub" style="color:#c2410c">⚠️ 读图提醒：本图按"矩阵结构"排列，W_q/W_k/W_v 上下排<b>不代表先后</b>——它们同吃一份 x̂、三路<u>并行</u>输出。真实的数据流（含 q/k/v 每一步的结果）请看 <a href="#s5c">5C</a>。</p>
   <svg viewBox="0 0 1380 952" width="100%" role="img" aria-label="zzmind-0.5B 参数矩阵结构示意图">
     <defs><marker id="arr" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>
 
@@ -393,6 +395,114 @@ SwiGLU 现役：down( silu( gate(x) ) · up(x) )  3 矩阵，gate 决定每条"�
     <!-- 参数汇总 -->
     <text x="90" y="924" font-size="12.5" font-weight="600" fill="#1f2430">每 Block 小计 20.4M（attn 4.92M + ffn 15.48M + 2×norm 2,560）→ ×24 = 489.6M ＋ W_E 8.19M + final norm 1,280 = 497,812,480 ≈ 497.8M</text>
   </svg>
+</section>
+
+<section id="s5c">
+  <h2><span class="no">5C.</span> Attention 数据流：从 x̂ 到输出（q/k/v 结果可视化）</h2>
+  <p class="sub">上半：真实形状的流程（注意 q/k/v 是<b>并行三路</b>，打分才汇合）。下半：玩具数字版，把每步的 q、k、v、分数、权重、输出都算给你看。</p>
+
+  <svg viewBox="0 0 1380 610" width="100%" role="img" aria-label="Attention 数据流（真实形状）">
+    <defs>
+      <marker id="arrB" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+      <marker id="arrQ" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    </defs>
+
+    <!-- x̂ 输入 -->
+    <rect x="615" y="56" width="150" height="36" rx="8" fill="#e2e8f0" stroke="#64748b"/>
+    <text x="626" y="79" font-size="13" font-weight="600" fill="#1f2430">x̂ [1,1280]</text>
+    <text x="600" y="48" font-size="11.5" fill="#64748b" text-anchor="middle">输入向量（RMSNorm 后）</text>
+
+    <!-- 三路并行箭头 -->
+    <line x1="690" y1="92" x2="270" y2="144" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arrQ)"/>
+    <line x1="690" y1="92" x2="660" y2="144" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arrQ)"/>
+    <line x1="690" y1="92" x2="1050" y2="144" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arrQ)"/>
+    <text x="428" y="122" font-size="12" fill="#334155">三路并行：同一个 x̂，三个矩阵【同时】乘　← 不是先后</text>
+
+    <!-- 投影 -->
+    <rect x="120" y="148" width="300" height="54" rx="8" fill="#2563eb"/>
+    <text x="132" y="170" font-size="13" font-weight="600" fill="#fff">W_q [1280×1280] → q [1280]</text>
+    <text x="132" y="190" font-size="11.5" fill="#dbeafe">16 头 × 80（16 份"问题"）</text>
+
+    <rect x="510" y="148" width="300" height="54" rx="8" fill="#3b82f6"/>
+    <text x="522" y="170" font-size="13" font-weight="600" fill="#fff">W_k [1280×640] → k [640]</text>
+    <text x="522" y="190" font-size="11.5" fill="#dbeafe">8 头 × 80（8 份"索引"）</text>
+
+    <rect x="900" y="148" width="300" height="54" rx="8" fill="#3b82f6"/>
+    <text x="912" y="170" font-size="13" font-weight="600" fill="#fff">W_v [1280×640] → v [640]</text>
+    <text x="912" y="190" font-size="11.5" fill="#dbeafe">8 头 × 80（8 份"内容"）</text>
+
+    <!-- 向下 -->
+    <line x1="270" y1="202" x2="270" y2="240" stroke="#94a3b8" marker-end="url(#arrB)"/>
+    <line x1="660" y1="202" x2="660" y2="240" stroke="#94a3b8" marker-end="url(#arrB)"/>
+    <line x1="1050" y1="202" x2="1050" y2="240" stroke="#94a3b8" marker-end="url(#arrB)"/>
+
+    <!-- repeat / 保持 -->
+    <rect x="120" y="244" width="300" height="40" rx="8" fill="#e0e7ff" stroke="#6366f1"/>
+    <text x="132" y="269" font-size="12" fill="#3730a3">q 保持 16 头（每个 Q 头独立打分）</text>
+
+    <rect x="510" y="244" width="300" height="40" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+    <text x="522" y="262" font-size="12" font-weight="600" fill="#92400e">repeat_kv(2)：k 8 → 16 套</text>
+    <text x="522" y="277" font-size="11" fill="#92400e">复制的是数值，W_k 不动</text>
+
+    <rect x="900" y="244" width="300" height="40" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+    <text x="912" y="262" font-size="12" font-weight="600" fill="#92400e">repeat_kv(2)：v 8 → 16 套</text>
+    <text x="912" y="277" font-size="11" fill="#92400e">2 个 Q 头共享 1 套 K+V</text>
+
+    <!-- 汇合到打分 -->
+    <line x1="270" y1="284" x2="600" y2="336" stroke="#94a3b8" marker-end="url(#arrB)"/>
+    <line x1="660" y1="284" x2="660" y2="336" stroke="#94a3b8" marker-end="url(#arrB)"/>
+    <line x1="1050" y1="284" x2="720" y2="336" stroke="#94a3b8" marker-end="url(#arrB)"/>
+    <text x="800" y="306" font-size="11.5" fill="#0e7490">QK-Norm + RoPE：打分前 q、k 各自过一遍</text>
+    <text x="800" y="320" font-size="11.5" fill="#0e7490">（V 不旋转）</text>
+
+    <!-- 打分 -->
+    <rect x="480" y="340" width="360" height="52" rx="8" fill="#0e7490"/>
+    <text x="492" y="361" font-size="13" font-weight="600" fill="#fff">① 打分：q·kᵀ/√80 → scores [16, S, S]</text>
+    <text x="492" y="380" font-size="11.5" fill="#cffafe">每头一张 S×S 图；因果 mask：上三角 -∞（只看过去）</text>
+    <line x1="660" y1="392" x2="660" y2="420" stroke="#94a3b8" marker-end="url(#arrB)"/>
+
+    <!-- softmax × v -->
+    <rect x="480" y="424" width="360" height="52" rx="8" fill="#15803d"/>
+    <text x="492" y="445" font-size="13" font-weight="600" fill="#fff">② softmax → 权重 × vʼ[16,S,80] → out [16,S,80]</text>
+    <text x="492" y="464" font-size="11.5" fill="#dcfce7">每行 = 当前 token 对"能看到的历史 token"的注意力权重</text>
+    <line x1="660" y1="476" x2="660" y2="504" stroke="#94a3b8" marker-end="url(#arrB)"/>
+
+    <!-- 拼接 + o_proj + 残差 -->
+    <rect x="480" y="508" width="420" height="74" rx="8" fill="#7c3aed"/>
+    <text x="492" y="530" font-size="13" font-weight="600" fill="#fff">③ 16 头拼接 → [B,S,1280] → o_proj → Δ</text>
+    <text x="492" y="550" font-size="12" fill="#ede9fe">残差：x = x + Δ（回到主路）</text>
+    <text x="492" y="570" font-size="11.5" fill="#ede9fe">→ 下一站：MLP 子层（RMSNorm → SwiGLU）→ 再残差 → 下一个 Block…</text>
+  </svg>
+
+  <h3 style="margin-top:18px">玩具数字版（S=2 个 token、head_dim=2、演示 1 头）——每一步都是真算出来的</h3>
+  <table>
+    <tr><th style="width:130px">① 三路投影（并行）</th><td>
+      输入：A=[1,0]，B=[0,1]　｜　W_q=[[2,0],[1,1]]，W_k=[[1,2],[1,0]]，W_v=[[0,2],[1,0]]<br>
+      <b>q_A</b>=[1,0]·W_q=<b>[2,0]</b>　<b>q_B</b>=[0,1]·W_q=<b>[1,1]</b>　｜　
+      <b>k_A</b>=<b>[1,2]</b>　<b>k_B</b>=<b>[1,0]</b>　｜　
+      <b>v_A</b>=<b>[0,2]</b>　<b>v_B</b>=<b>[1,0]</b>
+    </td></tr>
+    <tr><th>② 打分 q·kᵀ/√2</th><td>
+      <table style="width:auto">
+        <tr><th></th><th>看 A</th><th>看 B</th></tr>
+        <tr><td><b>A 当问的人</b></td><td>(2·1+0·2)/√2 = <b>1.41</b></td><td><b style="color:#c2410c">-∞（mask：不能偷看未来 B）</b></td></tr>
+        <tr><td><b>B 当问的人</b></td><td>(1·1+1·2)/√2 = <b>2.12</b></td><td>(1·1+1·0)/√2 = <b>0.71</b></td></tr>
+      </table>
+    </td></tr>
+    <tr><th>③ softmax → 权重</th><td>
+      A 行：[1.41, -∞] → [<b>1.00</b>, 0.00]　（只能看自己 → 100% 给自己）<br>
+      B 行：[2.12, 0.71] → [<b>0.80</b>, <b>0.20</b>]　（B 的 q 更贴 A 的 k → 主要关注 A）
+    </td></tr>
+    <tr><th>④ 按权重取 V</th><td>
+      <b>out_A</b> = 1.00·v_A + 0.00·v_B = <b>[0, 2]</b>　（输出 = 自己的内容）<br>
+      <b>out_B</b> = 0.80·[0,2] + 0.20·[1,0] = <b>[0.20, 1.61]</b>　（主体是 A 的内容，掺一点自己的）
+    </td></tr>
+    <tr><th>⑤ 后续</th><td>
+      16 头各自得到自己的 out_h → 拼接 [1280] → o_proj 融合 → +残差 → 进 MLP 子层。
+      到这里，attention 子层的数据流就闭环了。
+    </td></tr>
+  </table>
+  <p class="sub" style="margin-top:8px">读懂这张表 = 看懂 attention 的本质：<b>每个 token 的输出 = 它"能看到"的其他 token 的内容（v）按相关性（softmax(q·k)）加权求平均</b>。</p>
 </section>
 
 <section id="s6">
