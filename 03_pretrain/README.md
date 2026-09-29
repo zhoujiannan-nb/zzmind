@@ -25,16 +25,20 @@
 | `model.py` | 02 定稿的 0.5B 模型（497.8M，已完成） |
 | `config_zzmind0.5b.json` | DESIGN §9 定稿配置落盘（模型侧参数） |
 | `dataset.py` | PretrainDataset：jsonl 行偏移随机访问 + 截断 + pad 位屏蔽（-100） |
+| `token_rate.py` | E4 实测 token/字符 比率与全量 token 估算（node05 上跑） |
 | `trainer/train_pretrain.py` | 主入口：DDP/bf16/累积/clip/cosine/存档/续训 |
 | `trainer/trainer_utils.py` | get_lr / DDP 初始化 / 种子 / checkpoint / 模型+tokenizer 装载 |
 | `model/` | 01 阶段 6400 词表（tokenizer.json + config），已复制到此供训练用 |
 
-## 数据事实（00 阶段侦察结果）
+## 数据事实（00 阶段侦察 + E4 实测修正）
 - pretrain_t2t.jsonl：7.8G / 8,468,827 行 / {"text": "..."}，中文为主
-- 平均 ~920 字节/行 ≈ 600 字 ≈ 450~550 token（6400 词表，真实值以 tokenize 统计为准）
-- 全量 ≈ **4~5B token**，过一遍数据就是 4~5B token 的训练量
-- 我们第一版只训 ~1.5B token（约 1/3 数据），先要"能说话"，别贪多
-  （训练器用 `--total_tokens 1.5e9` → 折算总步数，到步自动停）
+- **E4 实测（2026-09-29, 抽样 2 万行）**：
+  - token/字符 = **0.758**（汉字节中式：1 字符 ≈ 1.32 token）
+  - 平均每行 **274 字符 / 208 token**；90.5% 行 ≤255 token，98.1% ≤511 token，99.8% ≤1023
+  - 全量 ≈ **1.76B token**（早期估的 4~5B 偏高了——6400 小词表下 token 密度比想象低）
+- **预算修正**：1.5B token ≈ 全量的 **85.2%**，即"第一版 ≈ 吃一遍语料的 85%"
+  （原来"约 1/3 数据"的说法作废，训练器 `--total_tokens 1.5e9` 到步自动停仍成立）
+- 路由语料（data_aug 产出，落满后再并入）：68 万条 × ~208 token ≈ **0.14B token**，占预算 ~9%
 
 ## 0.5B 预训练配置（拍板默认值，E1 实测后可调）
 | 项 | 值 | 备注 |
