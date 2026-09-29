@@ -168,6 +168,30 @@ input_ids [B,S]（token 编号）
 术语：**"层"（num_hidden_layers=24）= 一个 Block**（attn 子层 + mlp 子层）；
 Block 内 attn 在前、mlp 在后 = 原始 Transformer 顺序；pre-norm 保证残差"干净恒等"。
 
+**参数矩阵地图**（每层重复 ×24；`[行×列]`，参数 = 行×列）：
+
+```
+embed_tokens（与 lm_head 共享）  [6400 × 1280]   8.19M         ← 词表查表
+  Block:
+    input_layernorm              [1280]          1,280
+    q_proj                       [1280 × 1280]   1.64M  16 头×80
+    k_proj                       [1280 × 640]    0.82M   8 头×80（GQA 共享）
+    v_proj                       [1280 × 640]    0.82M   8 头×80
+    q_norm / k_norm              [80] × 2        160    （RoPE 之前）
+    o_proj                       [1280 × 1280]   1.64M  16 头输出合并
+    post_attention_layernorm     [1280]          1,280
+    gate_proj（SwiGLU 门控）      [1280 × 4032]   5.16M
+    up_proj（内容通道）           [1280 × 4032]   5.16M
+    down_proj（缩回）             [4032 × 1280]   5.16M
+final RMSNorm                    [1280]          1,280
+lm_head（= W_E）                 [1280 × 6400]   0      ← tie 共享，不占新参数
+──────────────────────────────────────────────────
+合计 497,812,480 ≈ 497.8M
+```
+
+> 比值记忆：每层 1280→4032→1280 是"先宽后窄"（SwiGLU 知识扩张再压缩）；
+> FFN : attention = 15.48M : 4.92M ≈ 3.15 : 1（L2 的配比，π 的出处）。
+
 ---
 
 ## 6. 参数量审计（E2 实测与手工账一致）

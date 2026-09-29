@@ -78,6 +78,7 @@
     <li><a href="#s3">组件决策</a></li>
     <li><a href="#s4">容量分配</a></li>
     <li><a href="#s5">结构全景</a></li>
+    <li><a href="#s5b">5B 矩阵结构图</a></li>
     <li><a href="#s6">参数审计</a></li>
     <li><a href="#s7">关键账</a></li>
     <li><a href="#s8">验证与风险</a></li>
@@ -246,6 +247,152 @@ SwiGLU 现役：down( silu( gate(x) ) · up(x) )  3 矩阵，gate 决定每条"�
   ▼
 ④ lm_head：1280→6400（与 ① 同一张权重）→ logits [B,S,6400]</pre>
   <p class="sub">术语：<b>"层"（num_hidden_layers=24）= 一个 Block</b>（attn 子层 + mlp 子层）；attn 在前、mlp 在后 = 原始 Transformer 顺序；pre-norm 保证残差"干净恒等"。</p>
+</section>
+
+<section id="s5b">
+  <h2><span class="no">5B.</span> 参数矩阵结构示意图</h2>
+  <p class="sub">基于 §9 定稿配置。自上而下 = 数据流；条宽 ∝ 该矩阵的最大维度（词表 6400 为全宽）；颜色 = 组件类别；框内/旁标注 = 矩阵 shape 与参数量。</p>
+  <svg viewBox="0 0 1380 952" width="100%" role="img" aria-label="zzmind-0.5B 参数矩阵结构示意图">
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>
+
+    <text x="20" y="28" font-size="17" font-weight="700" fill="#1f2430">zzmind-0.5B 参数矩阵结构（24 层重复的部分只画一遍，右侧 ×24）</text>
+
+    <g font-size="11.5" fill="#334155">
+      <rect x="22" y="44" width="12" height="12" rx="2" fill="#7c3aed"/><text x="40" y="54">Embedding（tie 共享）</text>
+      <rect x="170" y="44" width="12" height="12" rx="2" fill="#2563eb"/><text x="188" y="54">Attention 投影</text>
+      <rect x="310" y="44" width="12" height="12" rx="2" fill="#ea580c"/><text x="328" y="54">FFN（SwiGLU）</text>
+      <rect x="430" y="44" width="12" height="12" rx="2" fill="#10b981"/><text x="448" y="54">RMSNorm</text>
+      <rect x="530" y="44" width="12" height="12" rx="2" fill="#14b8a6"/><text x="548" y="54">QK-Norm</text>
+      <text x="660" y="54">虚线框 = 子层分组；右侧竖虚线 = tie 共享同一张 tensor</text>
+    </g>
+
+    <!-- Attention 子层分组 -->
+    <rect x="76" y="202" width="980" height="256" rx="10" fill="none" stroke="#2563eb" stroke-opacity=".45" stroke-dasharray="5,5"/>
+    <text x="88" y="196" font-size="11" fill="#2563eb">Attention 子层（GQA 16Q/8KV + QK-Norm + RoPE + o_proj）</text>
+    <!-- MLP 子层分组 -->
+    <rect x="76" y="462" width="980" height="190" rx="10" fill="none" stroke="#ea580c" stroke-opacity=".5" stroke-dasharray="5,5"/>
+    <text x="88" y="456" font-size="11" fill="#ea580c">MLP 子层（SwiGLU：silu(gate(x))·up(x) → down(x)）</text>
+
+    <!-- 残差分支 -->
+    <line x1="46" y1="214" x2="46" y2="452" stroke="#64748b" stroke-dasharray="4,3"/>
+    <circle cx="46" cy="452" r="7" fill="#fff" stroke="#64748b"/><text x="10" y="456" font-size="11" fill="#64748b">＋残差</text>
+    <line x1="46" y1="476" x2="46" y2="646" stroke="#64748b" stroke-dasharray="4,3"/>
+    <circle cx="46" cy="646" r="7" fill="#fff" stroke="#64748b"/><text x="10" y="650" font-size="11" fill="#64748b">＋残差</text>
+
+    <!-- tie 共享线 -->
+    <line x1="1004" y1="152" x2="1004" y2="756" stroke="#7c3aed" stroke-dasharray="5,4"/>
+    <text x="1014" y="300" font-size="11" fill="#7c3aed">tie_word_embeddings = true</text>
+    <text x="1014" y="316" font-size="11" fill="#7c3aed">同一张 tensor（共享）</text>
+
+    <!-- ×24 括号 -->
+    <line x1="1125" y1="214" x2="1125" y2="634" stroke="#94a3b8"/>
+    <line x1="1125" y1="214" x2="1148" y2="214" stroke="#94a3b8"/>
+    <line x1="1125" y1="634" x2="1148" y2="634" stroke="#94a3b8"/>
+    <text x="1152" y="430" font-size="14" font-weight="700" fill="#334155">×24</text>
+
+    <!-- 起点 -->
+    <rect x="90" y="74" width="170" height="30" rx="7" fill="#e2e8f0" stroke="#94a3b8"/>
+    <text x="104" y="93" font-size="13" font-weight="600" fill="#334155">input_ids [B,S]</text>
+    <line x1="175" y1="104" x2="175" y2="126" stroke="#94a3b8" marker-end="url(#arr)"/>
+
+    <!-- Embedding -->
+    <rect x="90" y="130" width="900" height="44" rx="8" fill="#7c3aed"/>
+    <text x="104" y="157" font-size="13" font-weight="600" fill="#fff">W_E · embed_tokens  [6400 × 1280]</text>
+    <text x="560" y="157" font-size="12.5" fill="#ede9fe">词表查表 · 8.19M（6400 行 token 向量；lm_head 同用）</text>
+    <line x1="175" y1="174" x2="175" y2="210" stroke="#94a3b8" marker-end="url(#arr)"/>
+
+    <!-- Block 内：norm1 -->
+    <rect x="90" y="214" width="180" height="14" rx="4" fill="#10b981"/>
+    <text x="98" y="224" font-size="11.5" fill="#fff">input_layernorm [1280]</text>
+    <line x1="175" y1="228" x2="175" y2="232" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_Q -->
+    <rect x="90" y="236" width="180" height="40" rx="6" fill="#2563eb"/>
+    <text x="98" y="261" font-size="12.5" fill="#fff">q_proj [1280×1280]</text>
+    <text x="280" y="261" font-size="12" fill="#334155">1.64M · 16 头 × 80</text>
+    <line x1="175" y1="276" x2="175" y2="280" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_K -->
+    <rect x="90" y="284" width="90" height="40" rx="6" fill="#3b82f6"/>
+    <text x="98" y="307" font-size="12" fill="#fff">k_proj [1280×640]</text>
+    <text x="190" y="309" font-size="12" fill="#334155">0.82M · 8 头 × 80（GQA 组共享）</text>
+    <line x1="135" y1="324" x2="135" y2="328" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_V -->
+    <rect x="90" y="332" width="90" height="40" rx="6" fill="#3b82f6"/>
+    <text x="98" y="355" font-size="12" fill="#fff">v_proj [1280×640]</text>
+    <text x="190" y="357" font-size="12" fill="#334155">0.82M · 8 头 × 80</text>
+    <line x1="135" y1="372" x2="135" y2="376" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- qk_norm -->
+    <rect x="90" y="380" width="80" height="12" rx="4" fill="#14b8a6"/>
+    <text x="98" y="390" font-size="11" fill="#fff">q/k_norm [80]</text>
+    <text x="180" y="392" font-size="11.5" fill="#334155">×2 · QK-Norm（RoPE 之前；RoPE = 40 对旋转面，θᵢ=1e6^(-2i/80)）</text>
+    <line x1="175" y1="392" x2="175" y2="396" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_O -->
+    <rect x="90" y="400" width="180" height="40" rx="6" fill="#2563eb"/>
+    <text x="98" y="425" font-size="12.5" fill="#fff">o_proj [1280×1280]</text>
+    <text x="280" y="425" font-size="12" fill="#334155">1.64M · 16 头输出合并</text>
+    <line x1="175" y1="440" x2="175" y2="448" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <text x="196" y="464" font-size="11.5" fill="#64748b">attn 输出 → 汇入残差</text>
+
+    <!-- norm2 -->
+    <rect x="90" y="476" width="180" height="14" rx="4" fill="#10b981"/>
+    <text x="98" y="486" font-size="11.5" fill="#fff">post_attention_layernorm [1280]</text>
+    <line x1="175" y1="490" x2="175" y2="494" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_gate -->
+    <rect x="90" y="498" width="567" height="40" rx="7" fill="#ea580c"/>
+    <text x="102" y="523" font-size="12.5" font-weight="600" fill="#fff">gate_proj  [1280 × 4032]</text>
+    <text x="430" y="523" font-size="12" fill="#fff7ed">5.16M · silu 门控开关</text>
+    <line x1="175" y1="538" x2="175" y2="542" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_up -->
+    <rect x="90" y="546" width="567" height="40" rx="7" fill="#f97316"/>
+    <text x="102" y="571" font-size="12.5" font-weight="600" fill="#fff">up_proj  [1280 × 4032]</text>
+    <text x="430" y="571" font-size="12" fill="#fff7ed">5.16M · 内容通道</text>
+    <line x1="175" y1="586" x2="175" y2="590" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <!-- W_down -->
+    <rect x="90" y="594" width="567" height="40" rx="7" fill="#c2410c"/>
+    <text x="102" y="619" font-size="12.5" font-weight="600" fill="#fff">down_proj  [4032 × 1280]</text>
+    <text x="430" y="619" font-size="12" fill="#fff7ed">5.16M · 缩回 hidden=1280</text>
+    <line x1="175" y1="634" x2="175" y2="642" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <text x="196" y="658" font-size="11.5" fill="#64748b">mlp 输出 → 汇入残差</text>
+
+    <!-- final norm -->
+    <line x1="175" y1="660" x2="175" y2="680" stroke="#94a3b8" marker-end="url(#arr)"/>
+    <rect x="90" y="684" width="180" height="14" rx="4" fill="#10b981"/>
+    <text x="98" y="694" font-size="11.5" fill="#fff">final RMSNorm [1280]</text>
+    <line x1="175" y1="698" x2="175" y2="708" stroke="#94a3b8" marker-end="url(#arr)"/>
+
+    <!-- lm_head（tied） -->
+    <rect x="90" y="712" width="900" height="44" rx="8" fill="#7c3aed" stroke="#4c1d95" stroke-dasharray="6,4"/>
+    <text x="104" y="739" font-size="13" font-weight="600" fill="#fff">lm_head · 与 W_E 共享（tie）[1280 × 6400]</text>
+    <text x="560" y="739" font-size="12.5" fill="#ede9fe">→ logits [B,S,6400]（softmax → 下一个 token 概率）</text>
+    <text x="90" y="790" font-size="12" fill="#334155">▸ 训练目标：logits 与 label（下一 token）算交叉熵；loss 从初始 ≈ ln(6400) 开始下降。</text>
+
+    <!-- GQA 头部编排 -->
+    <text x="90" y="826" font-size="13" font-weight="600" fill="#334155">GQA 头部编排（每层）：</text>
+    <text x="90" y="846" font-size="11.5" fill="#334155">16 个 Q 头 → 8 组，每组 2 个 Q 头共享一套 K/V：</text>
+    <g>
+      <rect x="90"  y="862" width="11" height="12" fill="hsl(0,70%,55%)"/><rect x="118" y="862" width="11" height="12" fill="hsl(0,70%,55%)"/>
+      <rect x="146" y="862" width="11" height="12" fill="hsl(45,70%,55%)"/><rect x="174" y="862" width="11" height="12" fill="hsl(45,70%,55%)"/>
+      <rect x="202" y="862" width="11" height="12" fill="hsl(90,70%,50%)"/><rect x="230" y="862" width="11" height="12" fill="hsl(90,70%,50%)"/>
+      <rect x="258" y="862" width="11" height="12" fill="hsl(135,70%,50%)"/><rect x="286" y="862" width="11" height="12" fill="hsl(135,70%,50%)"/>
+      <rect x="314" y="862" width="11" height="12" fill="hsl(180,70%,45%)"/><rect x="342" y="862" width="11" height="12" fill="hsl(180,70%,45%)"/>
+      <rect x="370" y="862" width="11" height="12" fill="hsl(225,70%,55%)"/><rect x="398" y="862" width="11" height="12" fill="hsl(225,70%,55%)"/>
+      <rect x="426" y="862" width="11" height="12" fill="hsl(270,70%,55%)"/><rect x="454" y="862" width="11" height="12" fill="hsl(270,70%,55%)"/>
+      <rect x="482" y="862" width="11" height="12" fill="hsl(315,70%,55%)"/><rect x="510" y="862" width="11" height="12" fill="hsl(315,70%,55%)"/>
+      <text x="530" y="872" font-size="11.5" fill="#334155">Q 头 ×16（一色一对 = 一组）</text>
+      <rect x="90" y="884" width="13" height="13" fill="hsl(0,70%,55%)"/><rect x="118" y="884" width="13" height="13" fill="hsl(45,70%,55%)"/>
+      <rect x="146" y="884" width="13" height="13" fill="hsl(90,70%,50%)"/><rect x="174" y="884" width="13" height="13" fill="hsl(135,70%,50%)"/>
+      <rect x="202" y="884" width="13" height="13" fill="hsl(180,70%,45%)"/><rect x="230" y="884" width="13" height="13" fill="hsl(225,70%,55%)"/>
+      <rect x="258" y="884" width="13" height="13" fill="hsl(270,70%,55%)"/><rect x="286" y="884" width="13" height="13" fill="hsl(315,70%,55%)"/>
+      <text x="310" y="895" font-size="11.5" fill="#334155">K/V 头 ×8（每组共享一套）→ KV cache 只有 MHA 的一半</text>
+    </g>
+
+    <!-- RoPE 备忘 -->
+    <text x="700" y="846" font-size="12" fill="#334155">· RoPE（位置）：head_dim=80 → 40 对二维旋转面</text>
+    <text x="700" y="866" font-size="12" fill="#334155">· 第 i 对按 pos×θᵢ 旋转，θᵢ = 1e6^(-2i/80)：高频→低频 40 档（像 40 根钟针）</text>
+    <text x="700" y="886" font-size="12" fill="#334155">· 旋转矩阵正交 → 点积只依赖相对位置差（绝对位置抵消）</text>
+
+    <!-- 参数汇总 -->
+    <text x="90" y="924" font-size="12.5" font-weight="600" fill="#1f2430">每 Block 小计 20.4M（attn 4.92M + ffn 15.48M + 2×norm 2,560）→ ×24 = 489.6M ＋ W_E 8.19M + final norm 1,280 = 497,812,480 ≈ 497.8M</text>
+  </svg>
 </section>
 
 <section id="s6">
