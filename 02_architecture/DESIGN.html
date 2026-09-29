@@ -81,6 +81,7 @@
     <li><a href="#s5b">5B 矩阵结构图</a></li>
     <li><a href="#s5c">5C 数据流演示</a></li>
     <li><a href="#s5d">5D MLP 与 Block 闭环</a></li>
+    <li><a href="#s5e">5E 投机解码</a></li>
     <li><a href="#s6">参数审计</a></li>
     <li><a href="#s7">关键账</a></li>
     <li><a href="#s8">验证与风险</a></li>
@@ -604,6 +605,37 @@ SwiGLU 现役：down( silu( gate(x) ) · up(x) )  3 矩阵，gate 决定每条"�
   </svg>
 
   <p class="sub" style="margin-top:8px">Block 零件小结：一个 Block = 2×RMSNorm + attn 的 q/k/v/o + qk_norm×2 + gate/up/down ≈ <b>20.4M 参数</b>；×24 层 = 489.6M。整条链路没有任何新魔法——<b>全是矩阵乘加 + 逐元素门控 + 残差直通</b>。</p>
+</section>
+
+<section id="s5e">
+  <h2><span class="no">5E.</span> 加速器：投机解码 / MTP 自投机</h2>
+  <p class="sub">MTP（Multi-Token Prediction）本是<b>训练技巧</b>（每步同时监督未来 2~4 步），却能当<b>推理加速器</b>用。核心三件事：草稿便宜给、验证只用一次并行前向、接受/拒绝发生在 lm_head 的 logits 上。</p>
+
+  <table>
+    <tr><th>形态</th><th>谁出草稿（便宜）</th><th>谁验证（lm_head）</th></tr>
+    <tr><td>双模型投机解码</td><td>独立小 draft 模型</td><td>大 target 模型</td></tr>
+    <tr><td><b>MTP 自投机（DeepSeek-V3）</b></td><td>同一模型的 MTP 头（共享主干与 KV cache）</td><td>同一个 lm_head</td></tr>
+  </table>
+
+  <h3 style="margin-bottom:6px">流程（K=3）</h3>
+  <pre>主模型本轮前向已给出 d₁（token_{t+1}）→ MTP₁ / MTP₂ 便宜提议 d₂、d₃
+→ 把 [前缀…, d₁, d₂, d₃] 当作一整条序列，【1 次并行前向】验证末尾 3 位
+     pos(放d₁处) 的 logits → 比 d₂；pos(放d₂处) 的 logits → 比 d₃
+→ 从 d₁ 逐个接受：argmax 一致 → 接受继续；不一致 → 停，改用主模型自己的 argmax
+→ 全中：一次白拿 3 个 token；不中：兜底回退 —— 输出分布一字不差</pre>
+
+  <table>
+    <tr><th>接受率 a（γ=3）</th><th>期望 token/前向 = 1+a+a²+a³</th><th>相对朴素 </th></tr>
+    <tr><td>0.65</td><td>≈ 2.35</td><td>≈ 2.1~2.3× 提速</td></tr>
+    <tr><td>0.70</td><td>≈ 2.53</td><td>≈ 2.3~2.5× 提速</td></tr>
+    <tr><td>1/6400（随机猜一个词）</td><td>≈ 1.00</td><td>不赚不亏</td></tr>
+  </table>
+
+  <p class="sub">三个"为什么想清楚就算懂"：
+  1) <b>验证只花 1 次前向</b>——解码是带宽瓶颈：权重 + KV cache 只被读一遍，算 1 个位置还是 3 个位置延迟几乎一样；
+  2) <b>接受/拒绝在 lm_head 的 logits 上做</b>（采样前的一步，纯标量比较），不在任何 Transformer 层内部；
+  3) <b>猜对了赚时间、猜错了不亏质量</b>：greedy 兜底用主模型 argmax；采样用拒绝采样 <code>min(1, q/p)</code> 保证最终分布精确等于目标分布。
+  MTP 深度取 2~4 即可——γ 越大全中概率按 a<sup>γ</sup> 指数掉，不划算。</p>
 </section>
 
 <section id="s6">
