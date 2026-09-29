@@ -27,7 +27,7 @@
 | `dataset.py` | PretrainDataset：jsonl 行偏移随机访问 + 截断 + pad 位屏蔽（-100）；**逗号分隔多文件混训** |
 | `token_rate.py` | E4 实测 token/字符 比率与全量 token 估算（node05 上跑） |
 | `merge_router.py` | 路由语料并入 03：data_aug 产出 → 标准 jsonl（过滤 persona，留给 04/05） |
-| `trainer/train_pretrain.py` | 主入口：DDP/bf16/累积/clip/cosine/存档/续训 |
+| `trainer/train_pretrain.py` | 主入口：DDP/bf16/累积/clip/cosine/存档/续训/预算到步停/**可选 swanlab 监控** |
 | `trainer/trainer_utils.py` | get_lr / DDP 初始化 / 种子 / checkpoint / 模型+tokenizer 装载 |
 | `model/` | 01 阶段 6400 词表（tokenizer.json + config），已复制到此供训练用 |
 
@@ -69,9 +69,8 @@ python 03_pretrain/trainer/train_pretrain.py --data_path 小文件.jsonl \
 
 # node05 双卡正式（2×4090）
 cd /mnt/boot/datasets/zzmind   # 代码传上去后的目录
-torchrun --nproc_per_node=2 03_pretrain/trainer/train_pretrain.py \
-    --data_path /mnt/boot/datasets/zzmind/pretrain_t2t.jsonl \
-    --save_dir /mnt/boot/datasets/zzmind/out
+bash 03_pretrain/start_e1.sh   # E1 冒烟 2000 步（GPU 空闲后）≈ 1 小时
+# 正式全长（45,776 步）：改 start_e1.sh 的 total_tokens=1.5e9 并去掉 save_interval 500 限制
 ```
 
 ## 学习清单

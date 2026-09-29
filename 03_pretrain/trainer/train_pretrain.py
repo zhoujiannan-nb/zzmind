@@ -35,6 +35,13 @@ from dataset import PretrainDataset
 from trainer.trainer_utils import (get_lr, Logger, is_main_process, lm_checkpoint,
                                    init_distributed_mode, setup_seed, init_model, SkipBatchSampler)
 
+# 监控可选：node05 装了 swanlab 且开了 --use_swanlab 才上报曲线
+try:
+    import swanlab
+    HAS_SWANLAB = True
+except ImportError:
+    swanlab, HAS_SWANLAB = None, False
+
 warnings.filterwarnings('ignore')
 
 
@@ -69,7 +76,7 @@ def train_epoch(epoch, loader, iters, start_step=0):
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-        # 5. 日志：loss / 吞吐 / ETA
+        # 5. 日志：loss / 吞吐 / ETA（控制台 + swanlab 曲线，需 --use_swanlab）
         if step % args.log_interval == 0 or step == iters:
             spend = time.time() - start_time
             cur_loss = loss.item() * args.accumulation_steps
@@ -77,6 +84,8 @@ def train_epoch(epoch, loader, iters, start_step=0):
             eta_min = spend / max(step - start_step, 1) * (iters - step) / 60
             Logger(f'Epoch:{epoch + 1}/{args.epochs} step:{step}/{iters} loss:{cur_loss:.4f} '
                    f'lr:{lr:.2e} {tps / 1e3:.1f}k tok/s ETA:{eta_min:.0f}min')
+            if swanlab and args.use_swanlab and is_main_process():
+                swanlab.log({"loss": cur_loss, "lr": lr, "tok_per_s": tps})
 
         # 6. 周期存档（只主进程做；权重 + resume 双份）
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
@@ -118,6 +127,7 @@ if __name__ == '__main__':
     parser.add_argument('--from_weight', default='none', type=str, help='从哪个权重续（none=从头）')
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help='1=读 resume.pth 自动续训')
     parser.add_argument('--use_compile', default=0, type=int, choices=[0, 1], help='torch.compile 加速（可选）')
+    parser.add_argument('--use_swanlab', action='store_true', help='启用 swanlab 曲线监控（需 node05 已安装）')
     args = parser.parse_args()
 
     # ===== 1. 环境：DDP / 随机种子 =====
@@ -138,6 +148,13 @@ if __name__ == '__main__':
 
     # ===== 4. 模型 / 数据 / 优化器 =====
     model, tokenizer = init_model(lm_config, args.from_weight, args.tokenizer_path, args.save_dir, args.device)
+
+    # 监控初始化（rank0 + 显式开启 + 已装 swanlab 三者都满足才启用）
+    if swanlab and args.use_swanlab and is_main_process():
+        swanlab.init(project='zzmind-0.5B', config=vars(args),
+                     name=f'pretrain_seq{args.max_seq_len}_bs{args.batch_size}_lr{args.learning_rate}')
+        Logger('[swanlab] 曲线监控已启用')
+
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))   # bf16 不需要缩放
