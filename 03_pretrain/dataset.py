@@ -13,30 +13,44 @@ from torch.utils.data import Dataset
 
 class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512):
+        """data_path 支持逗号分隔多文件（如 主语料,路由语料），按文件序拼接成一个数据集。"""
         super().__init__()
         self.tokenizer, self.max_length = tokenizer, max_length
-        self._path = data_path   # __getitem__ 时按行号 seek 回去读
+        self._path = data_path   # 兼容单文件
         self.bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 1
         self.eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 2
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
-        # 一次扫描建偏移表：记录每行的起始字节 + 字节长（不读内容）
-        self.offsets, self.sizes = [], []
-        with open(data_path, 'r', encoding='utf-8') as f:
-            while True:
-                off = f.tell()
-                line = f.readline()
-                if not line:
-                    break
-                self.offsets.append(off)
-                self.sizes.append(len(line.encode('utf-8')))
+        # 每个文件一份偏移表 + 各自的基址，__getitem__ 全局下标 → (文件i, 文件内行号)
+        self.file_offsets, self.file_sizes = [], []
+        self.file_cumsum = [0]   # 各文件行数累加，把全局下标映射到文件
+        for path in data_path.split(','):
+            offsets, sizes = [], []
+            with open(path, 'r', encoding='utf-8') as f:
+                while True:
+                    off = f.tell()
+                    line = f.readline()
+                    if not line:
+                        break
+                    offsets.append(off)
+                    sizes.append(len(line.encode('utf-8')))
+            self.file_offsets.append((path, offsets, sizes))
+            self.file_cumsum.append(self.file_cumsum[-1] + len(offsets))
 
     def __len__(self):
-        return len(self.offsets)
+        return self.file_cumsum[-1]
 
     def __getitem__(self, index):
-        with open(self._path, 'r', encoding='utf-8', errors='ignore') as f:
-            f.seek(self.offsets[index])
+        # 定位文件：cumsum[i] <= index < cumsum[i+1]
+        fi = 0
+        for i in range(1, len(self.file_cumsum)):
+            if index < self.file_cumsum[i]:
+                fi = i - 1
+                break
+        rel = index - self.file_cumsum[fi]
+        path, offsets, _ = self.file_offsets[fi]
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            f.seek(offsets[rel])
             line = f.readline()          # 文本模式下 read(n) 按字符数算，会越界，必须 readline
         text = json.loads(line)['text']
 

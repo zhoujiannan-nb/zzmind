@@ -100,7 +100,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='zzmind-0.5B Pretraining')
     parser.add_argument('--save_dir', type=str, default='../out', help='权重/续训点保存目录')
     parser.add_argument('--save_weight', default='pretrain', type=str, help='权重前缀名')
-    parser.add_argument('--data_path', type=str, required=True, help='预训练 jsonl（每行 {"text": ...}）')
+    parser.add_argument('--data_path', type=str, required=True, help='预训练 jsonl，逗号分隔多文件混训（每行 {"text": ...}）')
     parser.add_argument('--tokenizer_path', default=None, type=str, help='01 阶段 6400 词表目录（默认 ../model）')
     parser.add_argument('--epochs', type=int, default=1, help='数据过几遍（1.5B token ≈ 1/3 语料，一遍即可）')
     parser.add_argument('--batch_size', type=int, default=8, help='每卡微批大小（显存实测后可调）')

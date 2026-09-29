@@ -24,8 +24,9 @@
 |---|---|
 | `model.py` | 02 定稿的 0.5B 模型（497.8M，已完成） |
 | `config_zzmind0.5b.json` | DESIGN §9 定稿配置落盘（模型侧参数） |
-| `dataset.py` | PretrainDataset：jsonl 行偏移随机访问 + 截断 + pad 位屏蔽（-100） |
+| `dataset.py` | PretrainDataset：jsonl 行偏移随机访问 + 截断 + pad 位屏蔽（-100）；**逗号分隔多文件混训** |
 | `token_rate.py` | E4 实测 token/字符 比率与全量 token 估算（node05 上跑） |
+| `merge_router.py` | 路由语料并入 03：data_aug 产出 → 标准 jsonl（过滤 persona，留给 04/05） |
 | `trainer/train_pretrain.py` | 主入口：DDP/bf16/累积/clip/cosine/存档/续训 |
 | `trainer/trainer_utils.py` | get_lr / DDP 初始化 / 种子 / checkpoint / 模型+tokenizer 装载 |
 | `model/` | 01 阶段 6400 词表（tokenizer.json + config），已复制到此供训练用 |
@@ -38,7 +39,8 @@
   - 全量 ≈ **1.76B token**（早期估的 4~5B 偏高了——6400 小词表下 token 密度比想象低）
 - **预算修正**：1.5B token ≈ 全量的 **85.2%**，即"第一版 ≈ 吃一遍语料的 85%"
   （原来"约 1/3 数据"的说法作废，训练器 `--total_tokens 1.5e9` 到步自动停仍成立）
-- 路由语料（data_aug 产出，落满后再并入）：68 万条 × ~208 token ≈ **0.14B token**，占预算 ~9%
+- 路由语料（data_aug 产出，28.2 万条已 merge 测通）：~607 字符/条 ≈ **460 token/条**（含系统提示+思考链，比普通文本长），全量约 **0.13B token**，占预算 ~9%
+- **混训方式**：`--data_path 主语料.jsonl,router_for_pretrain.jsonl`（逗号分隔，dataset 支持多文件寻址，已单测通过）
 
 ## 0.5B 预训练配置（拍板默认值，E1 实测后可调）
 | 项 | 值 | 备注 |
