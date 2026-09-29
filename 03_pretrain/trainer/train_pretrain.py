@@ -171,7 +171,8 @@ if __name__ == '__main__':
         batch_sampler = SkipBatchSampler(sampler or torch.randperm(len(train_ds)).tolist(),
                                          args.batch_size, skip)
         loader = DataLoader(train_ds, batch_sampler=batch_sampler,
-                            num_workers=args.num_workers, pin_memory=True)
+                            num_workers=args.num_workers,
+                            pin_memory=('cuda' in args.device))   # CPU 模式别 pin，否则会占 cuda:0
         train_epoch(epoch, loader, args.total_steps, start_step)
 
     # ===== 9. 收尾 =====
