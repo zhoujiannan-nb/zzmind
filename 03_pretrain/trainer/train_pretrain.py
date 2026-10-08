@@ -50,7 +50,7 @@ def train_epoch(epoch, loader, iters, start_step=0):
     last_step = start_step
     for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
         if step > iters:
-            break   # 达到 token 预算总步数即停（epochs=1 时只吃 ~1/3 语料，合 DESIGN 预算）
+            break   # 达到 token 预算总步数即停（预算→步数的折算见 __main__ 第 7 步，不硬吃完语料）
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
         last_step = step
@@ -80,7 +80,7 @@ def train_epoch(epoch, loader, iters, start_step=0):
         if step % args.log_interval == 0 or step == iters:
             spend = time.time() - start_time
             cur_loss = loss.item() * args.accumulation_steps
-            tps = args.batch_size * args.max_seq_len * args.accumulation_steps * args.gpus / max(spend / (step - start_step), 1e-9)
+            tps = args.batch_size * args.max_seq_len * args.gpus / max(spend / (step - start_step), 1e-9)
             eta_min = spend / max(step - start_step, 1) * (iters - step) / 60
             Logger(f'Epoch:{epoch + 1}/{args.epochs} step:{step}/{iters} loss:{cur_loss:.4f} '
                    f'lr:{lr:.2e} {tps / 1e3:.1f}k tok/s ETA:{eta_min:.0f}min')
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_weight', default='pretrain', type=str, help='权重前缀名')
     parser.add_argument('--data_path', type=str, required=True, help='预训练 jsonl，逗号分隔多文件混训（每行 {"text": ...}）')
     parser.add_argument('--tokenizer_path', default=None, type=str, help='01 阶段 6400 词表目录（默认 ../model）')
-    parser.add_argument('--epochs', type=int, default=1, help='数据过几遍（1.5B token ≈ 1/3 语料，一遍即可）')
+    parser.add_argument('--epochs', type=int, default=1, help='数据过几遍（1.5B token 预算只吃全量 ~73%%，1 遍足够）')
     parser.add_argument('--batch_size', type=int, default=8, help='每卡微批大小（显存实测后可调）')
     parser.add_argument('--max_seq_len', type=int, default=512, help='训练序列长（README 拟定：512 起步）')
     parser.add_argument('--learning_rate', type=float, default=5e-4, help='峰值学习率')
@@ -174,11 +174,15 @@ if __name__ == '__main__':
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
 
-    # ===== 7. 总步数：token 预算 / 每步有效 token =====
-    per_step_tokens = args.batch_size * args.max_seq_len * args.accumulation_steps * args.gpus
+    # ===== 7. 总步数：token 预算 / 每步 token =====
+    # 一步 = 一个微批（loader 一次迭代），实际吃 bs×seq×gpus 个 token；
+    # 梯度累积不改变"吃多少数据"，只改变多久更新一次参数
+    per_step_tokens = args.batch_size * args.max_seq_len * args.gpus
     args.total_steps = int(args.total_tokens / per_step_tokens)
-    Logger(f'有效 batch：{args.batch_size}×{args.accumulation_steps}×{args.gpus}卡 '
-           f'= {per_step_tokens} token/step；预算 {args.total_tokens / 1e9}B token → {args.total_steps} 步')
+    eff_batch = per_step_tokens * args.accumulation_steps
+    Logger(f'每步(微批)：{args.batch_size}×{args.max_seq_len}×{args.gpus}卡 = {per_step_tokens} token；'
+           f'有效 batch(×累积{args.accumulation_steps}) = {eff_batch} token/更新')
+    Logger(f'预算 {args.total_tokens / 1e9}B token → {args.total_steps} 步，到步自动停')
 
     # ===== 8. 开训 =====
     for epoch in range(start_epoch, args.epochs):

@@ -112,7 +112,7 @@ python3 txy_proxy.py &        # :7788 → 127.0.0.1:7799
 - 10-08 抽查：sha1 零重复；~17% 条目标题前有教师输出多带的 `\n\n`（gen.py 校验 strip 后通过，外观问题不影响训练）
 - **10-08 已重新 merge**：全量 65.5 万条并入 03（`/mnt/boot/datasets/zzmind/router_for_pretrain.jsonl`
   948MB / 0.305B token；旧 28.2 万条版备份为 `.bak_282k_0929`——那版是 09-29 语料 41% 时 merge 的）
-- node05 的 `03_pretrain/` 代码与本地 HEAD（7662f4e）MD5 一致，可直接开 E1
+- node05 的 `03_pretrain/` 代码与本地一致（token 预算公式修正 + start_pretrain.sh），随时可开训
 
 ### 重启/操作清单
 
@@ -129,5 +129,5 @@ curl -X POST http://127.0.0.1:7799/api/control -d '{"key":"endpoint","idx":1,"wo
 - [x] 关注 simple 收尾后 normal/complex 的重复率（最终 fail 批次全 0，sha1 零重复）
 - [x] complex 占比最大（156K）且用 xhigh 思考档，吞吐会掉，盯 ETA（已完成 158,820 条）
 - [x] 语料落满后并入 03_pretrain 语料（10-08 全量 65.5 万条 merge 完成；persona 留 04_sft/05_alignment）
-- [ ] **E1 冒烟**：`bash /mnt/boot/datasets/zzmind/03_pretrain/start_e1.sh`（2000 步 ≈ 1h，GPU 空闲）
+- [ ] **03 开训**：`bash /mnt/boot/datasets/zzmind/03_pretrain/start_pretrain.sh`（1.5e9 token ≈ 183,105 步 ≈ 15~30h，GPU 空闲）
 - manifest.db / jsonl 属于数据产物，不进 git（在 node05 数据盘）

@@ -314,7 +314,7 @@ if __name__ == "__main__":
     model = MiniMindForCausalLM(cfg)
     n = sum(p.numel() for p in model.parameters())
     assert n == 497812480, f"参数量不对: {n}"
-    print(f"[smoke] ✓ params = {n:,} ≈ 497.8M（E2 审计一致）")
+    print(f"[smoke] ✓ params = {n:,} ≈ 497.8M（与 02 定稿一致）")
 
     ids = torch.randint(0, cfg.vocab_size, (2, 32))
     out = model(input_ids=ids, labels=ids)
