@@ -1,10 +1,10 @@
-# data_aug · 多意图路由语料合成（node05 正在跑的任务）
+# data_aug · 多意图路由语料合成（✅ 已完成）
 
 > 本目录是 **数据准备阶段**（`data/`）的核心任务：用 27B 教师模型（Qwen3.8-27B-FP8）为 0.5B 小智能体
 > **minicode** 预合成 68 万条"任务调度对话"语料，教会它把用户请求路由到合适的能力档模型卡片。
 > 产出主要供 **03_pretrain**（路由语料），人设类供 **04_sft / 05_alignment**。
-> 合成任务当前在 **node05** 上持续运行（`/mnt/boot/datasets/zzmind/data_aug/gen.py`），
-> 通过 **txy:7788** 看板远程监控（http://124.223.88.17:7788/）。
+> 合成任务在 **node05** 上运行，**2026-10-04 01:58 全部完成**（689,742 条 > 目标 679,995），
+> 此前通过 **txy:7788** 看板远程监控（http://124.223.88.17:7788/）。
 
 ## 双教师端点（v3，2026-09-28 上）
 
@@ -101,16 +101,18 @@ python3 txy_proxy.py &        # :7788 → 127.0.0.1:7799
 注意：`gen.py` 顶部硬编码了教师 API 地址和 KEY（内网代理，密钥可暴露级别 = 内网）。
 `BASE/KEY/MODEL` 换教师模型时改这三行。
 
-## 当前状态（2026-09-29 16:23 更新）
+## 当前状态（2026-10-08 15:30 复核，✅ 已完成）
 
-- 进程：`python3 gen.py run`（v3 双端点，PID 17908，09-28 10:45 拉起后常驻未断）
-- 端点：A(w=7) 与 B(qwen3.8-node05, w=9) **双双在产**（B 之前的平台 502 已恢复正常，inflight 9/9）；
-  总窗口 16，看板吞吐 ~1,660 tok/s，ETA ≈ 91,900s ≈ **再 1 天出头（25.5h）**
-- 进度：**278,834 / 679,995（41.0%）**，dup 0，failed 批次 5（simple 收尾时重复率高所致，可接受）
-- 分类型：simple 118,831/122,400（收尾）｜ normal 151,826/149,595（超额，批粒度）｜
-  **complex 8,155/156,405 进行中（#0293 代码，xhigh 思考最慢，是当前瓶颈）**｜
-  fallback / fuzzy / persona / self 未开跑（排队 ~25 万条，等 complex 之后按序推进）
-- 数据文件：`routing_multi_intent.jsonl` ~427MB / ~27.9 万行，`persona_posttrain.jsonl` 72KB / 49 行
+- **语料生成完毕**：10-04 01:58 收尾（"全部批次完成！本次 544411 条，用时 5.0天15.0时"），gen.py 进程已退出
+- 总进度：**689,742 / 679,995（101.4%）**，7 类型全部达标（批粒度超额），dup 0，fail 批次 0
+- 分类型：simple 123,623/122,400 ｜ normal 151,826/149,595 ｜ **complex 158,820/156,405** ｜
+  self 68,884/67,995 ｜ fuzzy 83,097/81,600 ｜ fallback 68,975/67,995 ｜ persona 34,517/34,005
+- 数据文件：`routing_multi_intent.jsonl` **655,176 行 / 1.02GB（≈0.30B token）**，
+  `persona_posttrain.jsonl` **34,566 行 / 52MB（≈0.015B token）**
+- 10-08 抽查：sha1 零重复；~17% 条目标题前有教师输出多带的 `\n\n`（gen.py 校验 strip 后通过，外观问题不影响训练）
+- **10-08 已重新 merge**：全量 65.5 万条并入 03（`/mnt/boot/datasets/zzmind/router_for_pretrain.jsonl`
+  948MB / 0.305B token；旧 28.2 万条版备份为 `.bak_282k_0929`——那版是 09-29 语料 41% 时 merge 的）
+- node05 的 `03_pretrain/` 代码与本地 HEAD（7662f4e）MD5 一致，可直接开 E1
 
 ### 重启/操作清单
 
@@ -124,7 +126,8 @@ curl -X POST http://127.0.0.1:7799/api/control -d '{"key":"endpoint","idx":1,"wo
 
 ## 接手待办
 
-- [ ] 关注 simple 收尾后 normal/complex 的重复率（failed 批次 = 4 次重试都撞 sha1 或校验不过）
-- [ ] complex 占比最大（156K）且用 xhigh 思考档，吞吐会掉，盯 ETA
-- [ ] 语料落满后：写 tokenize 脚本并入 03_pretrain 语料（persona 留 04_sft/05_alignment）
-- [ ] manifest.db / jsonl 属于数据产物，不进 git（在 node05 数据盘）
+- [x] 关注 simple 收尾后 normal/complex 的重复率（最终 fail 批次全 0，sha1 零重复）
+- [x] complex 占比最大（156K）且用 xhigh 思考档，吞吐会掉，盯 ETA（已完成 158,820 条）
+- [x] 语料落满后并入 03_pretrain 语料（10-08 全量 65.5 万条 merge 完成；persona 留 04_sft/05_alignment）
+- [ ] **E1 冒烟**：`bash /mnt/boot/datasets/zzmind/03_pretrain/start_e1.sh`（2000 步 ≈ 1h，GPU 空闲）
+- manifest.db / jsonl 属于数据产物，不进 git（在 node05 数据盘）

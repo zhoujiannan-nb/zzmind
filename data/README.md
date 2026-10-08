@@ -9,7 +9,7 @@
 ## 目录
 | 目录 | 内容 | 去向 | 状态 |
 |---|---|---|---|
-| [`data_aug/`](data_aug/) | 多意图路由语料合成：27B 教师蒸馏 68 万条"任务调度对话"（7 类型 × 15 领域） | `routing_multi_intent.jsonl`（~65 万）→ tokenize 后并入 **03_pretrain** 语料；`persona_posttrain.jsonl`（~3.4 万人设）→ **04_sft / 05_alignment** 后训练 | 🔵 进行中（node05 持续合成，进度/操作见该目录 README） |
+| [`data_aug/`](data_aug/) | 多意图路由语料合成：27B 教师蒸馏 68 万条"任务调度对话"（7 类型 × 15 领域） | `routing_multi_intent.jsonl`（65.5 万）→ 已 merge 进 **03_pretrain** 语料；`persona_posttrain.jsonl`（3.4 万人设）→ **04_sft / 05_alignment** 后训练 | ✅ 完成（10-04 落满 689,742 条；10-08 全量 merge 复核） |
 
 ## 数据流
 ```
