@@ -61,8 +61,9 @@
 | 项 | 值 |
 |---|---|
 | 训练机 | `ssh node05`，2× NVIDIA RTX 4090（24G×2） |
-| 软件 | Python 3.12.4 / torch 2.8.0+cu128 / transformers 4.57.6 |
-| 数据 | `/mnt/boot/datasets/zzmind/`（见 `00_env/README.md` 明细） |
+| 训练容器 | `zzmind-pre-trainning`（vllm 镜像，GPU 0+1，面板 :7791；start/stop 在 `/home/ai-servers/zzmind/`） |
+| 软件 | 容器内 Python / torch 2.13+cu130 / transformers 5.17；宿主机 Python 3.12.4 / torch 2.8.0+cu128 |
+| 数据 | `/mnt/boot/datasets/zzmind/`（容器内 `/data`，宿主机地址不动） |
 | 底座代码 | `D:\project_ai\minimind`（本地 Windows，ssh 到 node05 跑） |
 | 仓库 | https://github.com/zhoujiannan-nb/zzmind |
 

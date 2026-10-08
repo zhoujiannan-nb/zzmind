@@ -22,18 +22,20 @@ class PretrainDataset(Dataset):
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
         # 每个文件一份偏移表 + 各自的基址，__getitem__ 全局下标 → (文件i, 文件内行号)
+        # 二进制模式扫：tell()/seek() 是真字节偏移且快（文本模式 tell() 在部分 Python
+        # 版本上慢 ~56 倍，847 万行要 12 分钟 → 曾把训练启动拖死，node05 容器实测）
         self.file_offsets, self.file_sizes = [], []
         self.file_cumsum = [0]   # 各文件行数累加，把全局下标映射到文件
         for path in data_path.split(','):
             offsets, sizes = [], []
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, 'rb') as f:
                 while True:
                     off = f.tell()
                     line = f.readline()
                     if not line:
                         break
                     offsets.append(off)
-                    sizes.append(len(line.encode('utf-8')))
+                    sizes.append(len(line))
             self.file_offsets.append((path, offsets, sizes))
             self.file_cumsum.append(self.file_cumsum[-1] + len(offsets))
 
@@ -49,10 +51,10 @@ class PretrainDataset(Dataset):
                 break
         rel = index - self.file_cumsum[fi]
         path, offsets, _ = self.file_offsets[fi]
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(path, 'rb') as f:
             f.seek(offsets[rel])
-            line = f.readline()          # 文本模式下 read(n) 按字符数算，会越界，必须 readline
-        text = json.loads(line)['text']
+            raw = f.readline()          # 二进制 tell/seek 是字节偏移，精确且快
+        text = json.loads(raw.decode('utf-8', 'ignore'))['text']
 
         tokens = self.tokenizer(text, add_special_tokens=False,
                                 truncation=True, max_length=self.max_length - 2).input_ids

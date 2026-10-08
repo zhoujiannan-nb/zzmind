@@ -19,12 +19,14 @@
    初始权重：每卡各自随机初始化后，DDP 构造时把 rank0 的参数广播给所有卡对齐。
 7. **梯度裁剪**：clip_grad_norm_(params, 1.0)，防大梯度一步把模型冲坏。
 8. **数据流式访问**：PretrainDataset 建"行偏移表"，__getitem__ 才 seek 读那一行——
-   7.8G 语料不整包载入内存，开机即用。
+   7.8G 语料不整包载入内存，开机即用。偏移表必须**二进制模式**扫描：文本模式 tell()
+   在部分 Python 版本上慢 ~56 倍（847 万行 12 分钟 vs 13 秒），曾把训练启动拖死（node05 实测）。
 
 ## 代码地图
 | 文件 | 作用 |
 |---|---|
-| `start_pretrain.sh` | 正式训练启动（node05 双卡；`resume` 参数续训） |
+| `start_pretrain.sh` | 宿主机直跑启动（无 docker 时用；`resume` 参数续训） |
+| `docker/` | Docker 部署（默认方式）：`start.sh`/`stop.sh`（宿主机 `/home/ai-servers/zzmind/`）+ `monitor.py`（容器内监控面板+进度文件） |
 | `model.py` | 02 定稿的 0.5B 模型（497.8M）+ next-token loss 计算 + generate |
 | `config_zzmind0.5b.json` | 定稿配置落盘（模型侧参数） |
 | `dataset.py` | PretrainDataset：jsonl 行偏移随机访问 + 截断 + pad 位屏蔽（-100）；**逗号分隔多文件混训** |
@@ -57,14 +59,37 @@
 **时长估算**：单步(微批) ~0.3~0.6s → 183,105 步 ≈ **15~30 小时**。
 开跑后以日志实测 tok/s 为准修正 ETA。
 
-## 怎么跑
+## 怎么跑（Docker，默认）
+
+训练跑在容器 `zzmind-pre-trainning` 里（镜像 `vllm/vllm-openai:latest`：
+torch 2.13+cu130 / transformers 5.17，GPU 0+1，面板端口 7791）。
+
+| 挂载 | 宿主机 | 容器 |
+|---|---|---|
+| 训练数据 + 代码 + 进度存档 | `/mnt/boot/datasets/zzmind`（地址不动） | `/data` |
+| 脚本 + 进度文件 | `/home/ai-servers/zzmind` | `/opt/zzmind` |
+
 ```bash
-# node05 双卡正式
+bash /home/ai-servers/zzmind/start.sh          # 自动：读 progress.json，有断点续训，否则从头
+bash /home/ai-servers/zzmind/start.sh fresh    # 强制从头训（进度文件归档）
+bash /home/ai-servers/zzmind/stop.sh           # 只停训练（容器常驻，面板可用）
+bash /home/ai-servers/zzmind/stop.sh all       # 连同容器停
+```
+
+- **进度文件** `/home/ai-servers/zzmind/progress.json`：monitor.py 每 30s 解析最新日志写入
+  （status/step/loss/tok_s/ETA），**start.sh 靠它决定 `--from_resume` 与否**
+- **面板** `http://<node05>:7791/`：状态页 + `/log`（日志 tail）+ `/api/status`（JSON）
+- **实测（10-08）**：21.8k tok/s，显存 ~19.8G/卡，183,105 步 ≈ **19 小时**
+
+### 宿主机直跑（不用 docker）
+```bash
 cd /mnt/boot/datasets/zzmind/03_pretrain
 bash start_pretrain.sh            # 从头训
-bash start_pretrain.sh resume     # 崩溃/中断后续训（自动从 pretrain_resume.pth 跳过已训步数）
+bash start_pretrain.sh resume     # 续训
+```
 
-# 本地 CPU 冒烟（改配置前先验证链路，小文件）
+### 本地 CPU 冒烟（改配置前先验证链路）
+```bash
 python 03_pretrain/trainer/train_pretrain.py --data_path 小文件.jsonl \
     --device cpu --epochs 1 --batch_size 2 --max_seq_len 128 \
     --accumulation_steps 1 --warmup_steps 0 --total_tokens 100000 \
@@ -78,8 +103,8 @@ python 03_pretrain/trainer/train_pretrain.py --data_path 小文件.jsonl \
 - 曲线（可选）：启动参数加 `--use_swanlab`（需 node05 已装 swanlab）
 
 **流程**：
-1. 启动后前 100 步盯三件事：loss 从 ~8.76 平滑下降（无跳变 spike）、显存不 OOM、tok/s 稳定
-2. 中途可 kill / 断电，`bash start_pretrain.sh resume` 续训（存档点均为累积整数倍，步数对齐）
+1. 启动后前 100 步盯三件事：loss 从 ~8.76 平滑下降（无跳变 spike）、显存不 OOM（实测 ~19.8G/卡）、tok/s 稳定（实测 ~22k）
+2. 想停随时 `stop.sh`（或断电），`start.sh` 自动读进度文件续训（存档点均为累积整数倍，步数对齐）
 3. 训练期间定期用 checkpoint generate 几段文本存档，看模型什么时候开始说人话
 
 ## 学习清单
